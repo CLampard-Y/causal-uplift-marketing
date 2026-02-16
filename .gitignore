@@ -1,0 +1,25 @@
+# Required .gitignore rules
+
+# Raw data artifacts (large files, excluded from version control)
+data/raw/*
+!data/raw/.gitkeep
+
+# Processed and feature datasets (reproducible from source code)
+data/processed/*
+!data/processed/.gitkeep
+data/features/*
+!data/features/.gitkeep
+
+# Serialized model artifacts
+outputs/models/*.pkl
+outputs/models/*.joblib
+
+# Python cache and notebook checkpoints
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# Environment and virtual environment files
+.env
+venv/
+.venv/
