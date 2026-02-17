@@ -100,6 +100,13 @@ def load_and_clean(
         ]
         categorical_columns = [col for col in df.columns if col not in numeric_columns]
 
+        # ------------------------------------------------
+        #  Fill NaN columns (numeric & categorical)
+        # ------------------------------------------------
+        # Some models (e.g.Logistic Regression) cannot handle NaN values.
+        # XGBoost's handle of NaN values are "black boxex", may cause unexpected behavior.
+
+
         # Fill numeric nulls using median for robustness against skewed distributions.
         for col in numeric_columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -117,3 +124,52 @@ def load_and_clean(
                     raise ValueError(f"Cannot infer mode value for column: {col}")
                 df[col] = df[col].fillna(mode_values.iloc[0])
 
+        allowed_segments = {"Mens E-Mail", "Womens E-Mail", "No E-Mail"}
+        observed_segments = set(df["segment"].astype(str).unique())
+        unknown_segments = observed_segments - allowed_segments
+        if unknown_segments:
+            raise ValueError(f"Unknown segment values detected: {sorted(unknown_segments)}")
+
+        # Business Logic: Map experimental segment labels into binary treatment indicator.
+        df["treatment"] = df["segment"].isin(["Mens E-Mail", "Womens E-Mail"]).astype(int)
+
+        # DQ boundary control.
+        df["recency"] = pd.to_numeric(df["recency"], errors="coerce").fillna(1).clip(1, 12)
+        df["spend"] = pd.to_numeric(df["spend"], errors="coerce").fillna(0.0)
+        df.loc[df["spend"] < 0, "spend"] = 0.0
+
+        int_columns = ["recency", "mens", "womens", "newbie", "treatment", "conversion"]
+        float_columns = ["history", "spend"]
+
+        for col in int_columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+        for col in float_columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
+
+        # PRD-required assertions.
+        assert df.isnull().sum().sum() == 0, "Existing NaN values"
+        assert set(df["treatment"].unique()) == {0, 1}, "'treatment' column values error"
+        assert set(df["conversion"].unique()) <= {0, 1}, "'conversion' column values error"
+        assert (df["spend"] >= 0).all(), "'spend' column contains negative values"
+        assert 60000 <= len(df) <= 70000, "rows count error, check data source"
+        assert 0.60 <= float(df["treatment"].mean()) <= 0.70, "Treatment ratio error"
+
+        output_file = Path(output_path)
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Idempotency guard: prevent accidental data loss
+        if output_file.exists() and not overwrite:
+            raise FileExistsError(
+                f"Output file already exists: {output_file}. "
+                "Set overwrite=True to replace it, or use a different output_path."
+            )
+        
+        df.to_csv(output_file, index=False)
+
+        return df
+
+    except Exception as exc:
+        raise RuntimeError(f"load_and_clean failed for {filepath}: {exc}") from exc
+
+
+# [💡 Web3 Synergy]: The same raw-first then deterministic-cleaning pattern is highly reusable for on-chain event log normalization pipelines.
