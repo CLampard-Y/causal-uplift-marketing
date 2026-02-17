@@ -19,7 +19,6 @@ data:
   # minor business index ()
   spend_col: "spend"
   #Covariates (features for PSM and Uplift)
-  #
   covariates:
     - recency
     - history
@@ -43,6 +42,30 @@ uplift:
   base_model: "xgboost"
   n_estimators: 100
   max_depth: 5
+  # Required in production-style training to prevent overfitting
+  early_stopping_rounds: 10
+  # Hold-out ratio for validation-based early stopping
+  val_ratio: 0.2
+  # Validation split strategy to keep treatment/control representation stable
+  split_strategy: "stratified_shuffle"
+  # Primary stratification key for uplift validity
+  stratify_by: "treatment"
+  # Optional guard: if any cohort falls below this count in validation, trigger resplit/fallback
+  min_group_size_in_val: 100
+  # Model selection target should align with uplift business objective
+  eval_metric_for_selection: "auuc"
+
+  # ----- Phase 2 optional safeguards (currently disabled) -----
+  # Enable when entering Phase 2 modeling with stronger robustness needs
+  # imbalance_handling: true           # automatically rebalance minority classes
+  # pos_weight_strategy: "auto"        # options: auto | manual
+
+  # Control Type I error rate
+  # min_leaf_treated: 100               # minimum treated samples per segment/bin
+  # min_leaf_control: 100               # minimum control samples per segment/bin
+  
+  # collinearity_guard: true
+  # correlation_threshold: 0.95         # drop one of highly correlated feature pairs
 
 # Reproducibility control
 general:
