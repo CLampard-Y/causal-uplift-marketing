@@ -1,0 +1,49 @@
+# ================================================
+# PCU global configuration
+# Scope: data pipeline + causal/uplift baseline settings
+# ================================================
+
+# File paths for input/output artifacts
+paths:
+  raw_data: "data/raw/hillstrom.csv"
+  cleaned_data: "data/processed/hillstrom_cleaned.csv"
+  features_data: "data/processed/hillstrom_features.csv"
+  figures_dir: "outputs/figures/"
+
+# Core business columns and modeling covariates
+data:
+  # 0/1 treatment indicator
+  treatment_col: "treatment"
+  # core business index 
+  outcome_col: "conversion"
+  # minor business index ()
+  spend_col: "spend"
+  #Covariates (features for PSM and Uplift)
+  #
+  covariates:
+    - recency
+    - history
+    - mens
+    - womens
+    - newbie
+    - channel_Phone
+    - channel_Web
+    - zip_Suburban
+    - zip_Urban
+
+# Propensity Score Matching defaults
+psm:
+  # caliper = factor × std(propensity_score)
+  caliper_factor: 0.2
+  # 1:1 without replacement
+  matching_ratio: 1
+
+# Uplift model baseline hyperparameters
+uplift:
+  base_model: "xgboost"
+  n_estimators: 100
+  max_depth: 5
+
+# Reproducibility control
+general:
+  random_state: 42
