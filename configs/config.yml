@@ -6,6 +6,7 @@
 # File paths for input/output artifacts
 paths:
   raw_data: "data/raw/hillstrom.csv"
+  raw_text_data: "data/raw/hillstrom_raw_text.csv"
   cleaned_data: "data/processed/hillstrom_cleaned.csv"
   features_data: "data/processed/hillstrom_features.csv"
   figures_dir: "outputs/figures/"

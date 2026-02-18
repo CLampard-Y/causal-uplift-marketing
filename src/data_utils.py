@@ -26,27 +26,24 @@ def load_and_clean(
     pd.DataFrame
         Cleaned dataframe with `treatment` column.
     """
-    #if not isinstance(filepath, (str, Path)) or not filepath.strip():
-    # strip() will create new object, will consume memory when filepath is large
-
     # Strictly distinguish error:
     # 1. filepath is not a string → TypeError
     # 2. filepath is whitespace-only → ValueError
     if not isinstance(filepath, (str, Path)):
-        raise TypeError("`filepath` must be a non-empty string.")
-    if not filepath or filepath.isspace():
+        raise TypeError("`filepath` must be a non-empty path string or Path object.")
+    if not str(filepath).strip():
         raise ValueError("`filepath` cannot be empty or whitespace-only.")
-    
+
     #if not isinstance(output_path, (str, Path)) or not output_path.strip():
     if not isinstance(output_path, (str, Path)):
-        raise TypeError("`output_path` must be a non-empty string.")
-    if not output_path or output_path.isspace():
+        raise TypeError("`output_path` must be a non-empty path string or Path object.")
+    if not str(output_path).strip():
         raise ValueError("`output_path` cannot be empty or whitespace-only.")
-    
+
     #if not isinstance(raw_text_path, (str, Path)) or not raw_text_path.strip():
     if not isinstance(raw_text_path, (str, Path)):
-        raise TypeError("`raw_text_path` must be a non-empty string.")
-    if not raw_text_path or raw_text_path.isspace():
+        raise TypeError("`raw_text_path` must be a non-empty path string or Path object.")
+    if not str(raw_text_path).strip():
         raise ValueError("`raw_text_path` cannot be empty or whitespace-only.")
 
     source_path = Path(filepath)
@@ -124,13 +121,19 @@ def load_and_clean(
                     raise ValueError(f"Cannot infer mode value for column: {col}")
                 df[col] = df[col].fillna(mode_values.iloc[0])
 
+        # ------------------------------------------------
+        #  Examination of segment values
+        # ------------------------------------------------
+        # Define allowed segment values
         allowed_segments = {"Mens E-Mail", "Womens E-Mail", "No E-Mail"}
         observed_segments = set(df["segment"].astype(str).unique())
+
+        # Check for illegal segment values
         unknown_segments = observed_segments - allowed_segments
         if unknown_segments:
             raise ValueError(f"Unknown segment values detected: {sorted(unknown_segments)}")
 
-        # Business Logic: Map experimental segment labels into binary treatment indicator.
+        # Map experimental segment labels into binary treatment indicator.
         df["treatment"] = df["segment"].isin(["Mens E-Mail", "Womens E-Mail"]).astype(int)
 
         # DQ boundary control.
@@ -146,8 +149,10 @@ def load_and_clean(
         for col in float_columns:
             df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0).astype(float)
 
-        # PRD-required assertions.
-        assert df.isnull().sum().sum() == 0, "Existing NaN values"
+        # Error-checking assertions
+        null_columns = df.isnull().sum()
+        null_cols = null_columns[null_columns > 0]
+        assert len(null_cols) == 0, f"Existing NaN values in columns: {null_cols.to_dict()}"
         assert set(df["treatment"].unique()) == {0, 1}, "'treatment' column values error"
         assert set(df["conversion"].unique()) <= {0, 1}, "'conversion' column values error"
         assert (df["spend"] >= 0).all(), "'spend' column contains negative values"
@@ -170,6 +175,3 @@ def load_and_clean(
 
     except Exception as exc:
         raise RuntimeError(f"load_and_clean failed for {filepath}: {exc}") from exc
-
-
-# [💡 Web3 Synergy]: The same raw-first then deterministic-cleaning pattern is highly reusable for on-chain event log normalization pipelines.
