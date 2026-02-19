@@ -20,6 +20,13 @@ data:
   # minor business index ()
   spend_col: "spend"
   #Covariates (features for PSM and Uplift)
+  # Why not include zip_Rural,channel_Multichannel (What will happen if we include them):
+  #   Any one can be represented linearly by the other two
+  #     (e.g. zip_Rural = zip_Urban + zip_Suburban)
+  #   In linear/logistic regression, this can lead to:
+  #     - The design matrix X being rank deficient
+  #     - The matrix X^T X being non-invertible
+  #     - The inability to solve for regression coefficients (or coefficients not being unique)
   covariates:
     - recency
     - history
