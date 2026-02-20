@@ -277,7 +277,74 @@ def build_features(df: pd.DataFrame, config) -> pd.DataFrame:
         womens_numeric = pd.to_numeric(features["womens"], errors="raise")
         features["is_both_gender"] = ((mens_numeric > 0) & (womens_numeric > 0)).astype(np.int64)
 
+        # -------------------------
+        # 3) Architecture-level column drop
+        # -------------------------
+        drop_cols = ["segment", "history_segment", "channel", "zip_code", "visit"]
 
+        # Drop `visit` because it is a downstream mediator of treatment assignment.
+        # Keeping it would introduce mediator bias and can underestimate ATE.
+
+        # Keep `spend` in the feature table (not as the modeling target) because it is extremely
+        # zero-inflated; mean-based effect estimates are unstable, but it is useful for ROI simulation.
+
+        features = features.drop(columns=[c for c in drop_cols if c in features.columns], errors="ignore")
+
+        # -------------------------
+        # 4) Type coercion (numeric-only table)
+        # -------------------------
+        # Convert any remaining boolean-like columns to int and enforce numeric dtypes.
+        for col in list(features.columns):
+            if pd.api.types.is_bool_dtype(features[col]):
+                features[col] = features[col].astype(np.int64)
+            if not pd.api.types.is_numeric_dtype(features[col]):
+                features[col] = pd.to_numeric(features[col], errors="raise")
+
+        # -------------------------
+        # 5) Data quality assertions (must all run before return)
+        # -------------------------
+        # 1. Dtype: all columns must be numeric (int/float)
+        assert all(
+            pd.api.types.is_numeric_dtype(features[c]) for c in features.columns
+        ), "All columns must be numeric (int/float)."
+
+        # 2. NaN: no missing values anywhere
+        assert features.isnull().sum().sum() == 0, "Data contains NaN values."
+
+        # 3. Inf: no +/- inf anywhere
+        values = features.to_numpy(dtype=float, copy=False)
+        assert np.isfinite(values).all(), "Data contains inf or -inf values."
+
+        # 4. Channel mutual exclusivity/completeness: row-wise sum of channel_* must equal 1
+        channel_cols = [c for c in features.columns if c.startswith("channel_")]
+        assert len(channel_cols) > 0, "One-hot encoding for channel produced no `channel_*` columns."
+        assert (features[channel_cols].sum(axis=1) == 1).all(), "Channel one-hot columns must sum to 1 per row."
+
+        # 5. Zip mutual exclusivity/completeness: row-wise sum of zip_* must equal 1
+        zip_cols = [c for c in features.columns if c.startswith("zip_")]
+        assert len(zip_cols) > 0, "One-hot encoding for zip_code produced no `zip_*` columns."
+        assert (features[zip_cols].sum(axis=1) == 1).all(), "Zip one-hot columns must sum to 1 per row."
+
+        # 6-8. Mandatory keep columns
+        assert "treatment" in features.columns, "Missing required column: treatment."
+        assert "conversion" in features.columns, "Missing required column: conversion."
+        assert "spend" in features.columns, "Missing required column: spend."
+
+        # 9-12. Mandatory dropped columns (must NOT exist)
+        assert "segment" not in features.columns, "Forbidden column present: segment."
+        assert "channel" not in features.columns, "Forbidden column present: channel."
+        assert "zip_code" not in features.columns, "Forbidden column present: zip_code."
+        assert "visit" not in features.columns, "Forbidden column present: visit."
+
+        # 13. Column count bounds
+        assert 15 <= features.shape[1] <= 20, "Feature DataFrame must have between 15 and 20 columns."
+
+        # -------------------------
+        # 6) Persist
+        # -------------------------
+        out_path = _get_config_path_features_data(config)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        features.to_csv(out_path, index=False)
 
         return features
 
