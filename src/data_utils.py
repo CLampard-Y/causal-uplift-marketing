@@ -6,6 +6,7 @@ from __future__ import annotations
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 import pandas as pd
+import numpy as np
 
 # ELT approach: load raw data in string format, then apply transformation.
 # Improves auditability and reproducibility when cleaning rules evolve.
@@ -175,3 +176,111 @@ def load_and_clean(
 
     except Exception as exc:
         raise RuntimeError(f"load_and_clean failed for {filepath}: {exc}") from exc
+    
+
+def build_features(df: pd.DataFrame, config) -> pd.DataFrame:
+    """
+    Build a feature matrix for causal/uplift baselines and persist to `config.paths.features_data`.
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Cleaned dataset with treatment/outcomes and baseline covariates.
+    config : Any
+        Configuration object/dict with `paths.features_data` (or equivalent)
+    Returns
+    -------
+    pd.DataFrame
+        Final feature DataFrame saved to disk.
+    """
+
+    # Define function to get config path
+    # Supports: 1. dict-like config['paths']['features_data']
+    #           2. object-like config.paths.features_data
+    def _get_config_path_features_data(cfg) -> Path:
+        if cfg is None:
+            raise ValueError("`config` must not be None.")
+
+        # dict-like config
+        if isinstance(cfg, dict):
+            if "paths" not in cfg:
+                raise KeyError("config['paths'] must exist and be a dict.")
+            if not isinstance(cfg["paths"], dict):
+                raise TypeError("config['paths'] must be a dict.")
+            if "features_data" not in cfg["paths"]:
+                raise KeyError("config['paths']['features_data'] must exist.")
+            return Path(cfg["paths"]["features_data"])
+
+        # object-like config
+        # Check: config.paths.features_data
+        paths = getattr(cfg, "paths", None)
+        if paths is not None and hasattr(paths, "features_data"):
+            # If passed, `paths.features_data` must exist
+            return Path(paths.features_data)
+
+        # object-like config
+        # Check: config.features_data (allow a flat attribute or key)
+        if hasattr(cfg, "features_data"):
+            return Path(cfg.features_data)
+        
+        # Final error
+        raise KeyError("config must provide `paths.features_data` (or dict equivalent).")
+
+    try:
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("`df` must be a pandas DataFrame.")
+        if df.empty:
+            raise ValueError("`df` must not be empty.")
+
+        required_cols = {
+            "channel",
+            "zip_code",
+            "history",
+            "mens",
+            "womens",
+            "treatment",
+            "conversion",
+            "spend",
+        }
+        missing = required_cols - set(df.columns)
+        if missing:
+            raise ValueError(f"Missing required columns for feature engineering: {sorted(missing)}")
+
+        features = df.copy()
+
+        # -------------------------
+        # 1) One-hot encoding
+        # -------------------------
+        channel_dummies = pd.get_dummies(
+            features["channel"],
+            prefix="channel",
+            prefix_sep="_",
+            dtype=np.int64,
+        )
+        zip_dummies = pd.get_dummies(
+            features["zip_code"],
+            prefix="zip",
+            prefix_sep="_",
+            dtype=np.int64,
+        )
+        features = pd.concat([features, channel_dummies, zip_dummies], axis=1)
+
+        # -------------------------
+        # 2) Derived features
+        # -------------------------
+        history_numeric = pd.to_numeric(features["history"], errors="raise")
+        assert (history_numeric >= 0).all(), "`history` must be non-negative for log1p."
+
+        # Defensive against log(0) -> -inf by construction (log1p).
+        features["history_log"] = np.log1p(history_numeric)
+
+        mens_numeric = pd.to_numeric(features["mens"], errors="raise")
+        womens_numeric = pd.to_numeric(features["womens"], errors="raise")
+        features["is_both_gender"] = ((mens_numeric > 0) & (womens_numeric > 0)).astype(np.int64)
+
+
+
+        return features
+
+    except Exception as exc:
+        raise RuntimeError(f"build_features failed: {exc}") from exc
+
