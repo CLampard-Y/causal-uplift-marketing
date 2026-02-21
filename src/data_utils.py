@@ -160,6 +160,33 @@ def load_and_clean(
         assert 60000 <= len(df) <= 70000, "rows count error, check data source"
         assert 0.60 <= float(df["treatment"].mean()) <= 0.70, "Treatment ratio error"
 
+        # Temporal contamination check: verify visit is a true post-treatment variable
+        # If control group visit rate >= treatment group, it suggests pre-treatment visits exist
+        if "visit" in df.columns:
+            # Convert visit to numeric (handle string '0'/'1' from raw data)
+            # Use .astype(str) first to ensure consistent string type, then convert to int
+            df_visit_clean = df["visit"].astype(str).str.strip()
+            visit_numeric = pd.to_numeric(df_visit_clean, errors="coerce").fillna(0).astype(int)
+
+            # Calculate visit rates by group
+            control_mask = df["treatment"] == 0
+            treatment_mask = df["treatment"] == 1
+            control_visit_rate = visit_numeric[control_mask].mean()
+            treatment_visit_rate = visit_numeric[treatment_mask].mean()
+
+            # Output visit rates for transparency and debugging (BEFORE assertion)
+            print(f"[Temporal Contamination Check]")
+            print(f"  Control group visit rate:   {control_visit_rate:.4f} ({control_visit_rate:.2%})")
+            print(f"  Treatment group visit rate: {treatment_visit_rate:.4f} ({treatment_visit_rate:.2%})")
+            print(f"  Difference: {treatment_visit_rate - control_visit_rate:.4f}")
+
+            # Only assert if the difference is meaningful (not just floating point error)
+            assert control_visit_rate < treatment_visit_rate, (
+                f"Temporal contamination detected: control visit rate ({control_visit_rate:.2%}) "
+                f">= treatment visit rate ({treatment_visit_rate:.2%}). "
+                "This suggests pre-treatment visits may exist, violating the post-treatment assumption."
+            )
+
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)
         
