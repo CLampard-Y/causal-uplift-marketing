@@ -35,7 +35,7 @@ data:
     - newbie
     - channel_Phone
     - channel_Web
-    - zip_Suburban
+    - zip_Surburban
     - zip_Urban
 
 # Propensity Score Matching defaults
