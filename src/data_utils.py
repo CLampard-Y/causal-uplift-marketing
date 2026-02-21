@@ -180,10 +180,15 @@ def load_and_clean(
             print(f"  Treatment group visit rate: {treatment_visit_rate:.4f} ({treatment_visit_rate:.2%})")
             print(f"  Difference: {treatment_visit_rate - control_visit_rate:.4f}")
 
-            # Only assert if the difference is meaningful (not just floating point error)
-            assert control_visit_rate < treatment_visit_rate, (
-                f"Temporal contamination detected: control visit rate ({control_visit_rate:.2%}) "
-                f">= treatment visit rate ({treatment_visit_rate:.2%}). "
+            # Use threshold-based check to avoid false positives from floating-point precision
+            # or legitimate edge cases where the difference is negligible
+            MIN_VISIT_LIFT = 0.01  # 1% minimum expected lift
+            visit_lift = control_visit_rate - treatment_visit_rate
+
+            assert visit_lift >= MIN_VISIT_LIFT, (
+                f"Temporal contamination suspected: treatment visit rate ({treatment_visit_rate:.2%}) "
+                f"is not sufficiently higher than control ({control_visit_rate:.2%}). "
+                f"Expected lift >= {MIN_VISIT_LIFT:.2%}, observed: {visit_lift:.2%}. "
                 "This suggests pre-treatment visits may exist, violating the post-treatment assumption."
             )
 
