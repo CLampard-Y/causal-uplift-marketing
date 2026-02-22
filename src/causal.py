@@ -1,14 +1,14 @@
 # ===============================================
 # Causal inference utilities (Phase 2).
 # ===============================================
-
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression, NearestNeighbors
+from sklearn.linear_model import LogisticRegression
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from sklearn.neighbors import NearestNeighbors
 
 
 
@@ -142,16 +142,6 @@ def estimate_ps(
 
     return ps, model
 
-from __future__ import annotations
-
-from pathlib import Path
-from datetime import datetime, timezone, timedelta
-
-import numpy as np
-import pandas as pd
-from sklearn.neighbors import NearestNeighbors
-
-
 def match_ps(
     df: pd.DataFrame,
     ps_col: str = "ps",
@@ -228,27 +218,29 @@ def match_ps(
         if caliper <= 0.0:
             raise ValueError("Computed caliper is non-positive; check PS distribution")
 
-        # KD-tree nearest neighbor
-        # For each Control sample, find nearest Treated sample in PS space.
-        nn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree")
-        nn.fit(pd.DataFrame({
-                    ps_col: pd.to_numeric(treated[ps_col], errors="raise").to_numpy(dtype=float)
-                }
-            )
-               
-        )
+        # ------------------------------------------------------
+        # 3) 1-NN nearest neighbors (INCORRECT)
+        # ------------------------------------------------------
+        # For each Control sample, retrieve the nearest Treated candidate in PS space.
 
+        """
+        # INCORRECT Core point (1): n_neighbors=1
+        # In RCT data, a control sample may have multiple treatment candidates.
+        # Therefore, many controls may share the same nearest control candidate.
+        # Once that candidate is used, it cannot be used again
+        # Resulting in many control samples have no matches.
+
+        nn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree")
+        nn.fit(pd.DataFrame({ps_col: pd.to_numeric(treated[ps_col], errors="raise").to_numpy(dtype=float)}))
         distances, indices = nn.kneighbors(
             pd.DataFrame({ps_col: pd.to_numeric(control[ps_col], errors="raise").to_numpy(dtype=float)}),
             return_distance=True,
         )
 
-        # Build candidate pairs (vectorized)
-        # indices are positions into treated (row-order of treated DataFrame)
         pairs = pd.DataFrame(
             {
                 "ctrl_index": control.index.to_numpy(),
-                "treat_pos": indices[:, 0].astype(int),  # row index in treateed DataFrame
+                "treat_pos": indices[:, 0].astype(int),
                 "dist": distances[:, 0].astype(float),
             }
         )
@@ -256,19 +248,90 @@ def match_ps(
         # Filter by caliper
         pairs = pairs.loc[pairs["dist"] <= caliper].copy()
 
-        # ------------------------------------------------------
-        # 3) No-replacement constraint (vectorized, no Python loop)
-        # ------------------------------------------------------
+        
+        # INCORRECT Core point (2): drop_duplicates(subset=["treat_pos"], keep="first")
+        # AS mentioned above, multiple controls may share the same treated sample
+        # Using `drop_duplicates` will remove the treated sample which be tied by many controls only keep the first one
+        # Resulting in many control samples have no matches,leading to low match rate.
+
         # - Each Control appears once by construction.
         # - Enforce each Treated used at most once by keeping the smallest-distance pair per treat_pos.
-        # Sort by distance ascending
-        # mergesort: stable, selects the first duplicate, not the last, random
         pairs = pairs.sort_values("dist", ascending=True, kind="mergesort")
         pairs = pairs.drop_duplicates(subset=["treat_pos"], keep="first")
+        """
 
-        # Map treat_pos -> treated index
+
+        # ------------------------------------------------------
+        # 4) KD-tree nearest neighbors (CORRECT)
+        # ------------------------------------------------------
+        # For each Control sample, retrieve k nearest Treated candidates in PS space.
+        #
+        # RCT-specific robustness:
+        # In RCT data, PS values can be extremely concentrated and may contain many exact ties.
+        # If we only query 1-NN, tie-breaking can map many controls to the same treated unit, and enforcing
+        # no-replacement will artificially destroy the match rate. The robust fix is:
+        #   - query k-NN (k is a small constant)
+        #   - for each control, pick the first available treated candidate within caliper that is not used yet
+        #
+        # Complexity: O(n log n) for KD-tree query + O(n * k) selection, where k is a small constant.
+        treated_ps = pd.to_numeric(treated[ps_col], errors="raise").to_numpy(dtype=float, copy=False)
+        control_ps = pd.to_numeric(control[ps_col], errors="raise").to_numpy(dtype=float, copy=False)
+
+        # k is a small constant; increase to improve feasibility under heavy tie collisions.
+        k = int(min(200, len(treated_ps)))
+        nn = NearestNeighbors(n_neighbors=k, algorithm="kd_tree")
+        nn.fit(pd.DataFrame({ps_col: treated_ps}))
+
+        distances, indices = nn.kneighbors(pd.DataFrame({ps_col: control_ps}), return_distance=True)
+
+        # ------------------------------------------------------
+        # 5) No-replacement constraint with tie-robust candidate fallback
+        # ------------------------------------------------------
+        # Pseudocode-compatible, but enhanced:
+        #   For each control (sorted by nearest distance), try its k candidates in order until finding an unused treated.
+        sorted_order = np.argsort(distances[:, 0], kind="mergesort")
+        used_treatment_positions: set[int] = set()
+
+        matched_ctrl_idx: list[int] = []
+        matched_treat_idx: list[int] = []
+
+        # Under ties, 1-NN creates many-to-one collisions; 
+        # k-NN provides alternative feasible neighbors.
         treated_index_array = treated.index.to_numpy()
-        pairs["treat_index"] = treated_index_array[pairs["treat_pos"].to_numpy(dtype=int)]
+        control_index_array = control.index.to_numpy()
+
+        for ctrl_pos in sorted_order:
+            # Short-circuit: if even the nearest neighbor exceeds caliper, none of the k neighbors can pass.
+            if distances[ctrl_pos, 0] > caliper:
+                continue
+
+            # Try candidates in order (0..k-1) until finding an unused treated within caliper.
+            cand_treat_positions = indices[ctrl_pos, :]
+            cand_distances = distances[ctrl_pos, :]
+
+            # Vectorized mask for feasible candidates within caliper
+            feasible_mask = cand_distances <= caliper
+            if not feasible_mask.any():
+                continue
+
+            for j in np.flatnonzero(feasible_mask):
+                treat_pos = int(cand_treat_positions[j])
+                if treat_pos in used_treatment_positions:
+                    continue
+                used_treatment_positions.add(treat_pos)
+                matched_ctrl_idx.append(int(control_index_array[ctrl_pos]))
+                matched_treat_idx.append(int(treated_index_array[treat_pos]))
+                break
+
+        pairs = pd.DataFrame(
+            {
+                "ctrl_index": np.asarray(matched_ctrl_idx, dtype=int),
+                "treat_index": np.asarray(matched_treat_idx, dtype=int),
+            }
+        )
+
+        if pairs.empty:
+            raise ValueError("No matches produced; check caliper rule and PS overlap")
 
         # Assign match_id (dense 0..k-1)
         pairs = pairs.reset_index(drop=True)
@@ -288,9 +351,9 @@ def match_ps(
         matched_df = df.loc[stacked["row_index"].to_list()].copy()
         matched_df["match_id"] = stacked["match_id"].to_numpy(dtype=int)
 
-        # ======================================================
-        # 4) DQ checks + required asserts
-        # ======================================================
+        # ------------------------------------------------------
+        # 6) DQ checks + required asserts
+        # ------------------------------------------------------
         n_treated = int(pd.to_numeric(matched_df[treatment_col], errors="coerce").sum())
         n_control = int(len(matched_df) - n_treated)
 
