@@ -248,7 +248,7 @@ def match_ps(
         pairs = pd.DataFrame(
             {
                 "ctrl_index": control.index.to_numpy(),
-                "treat_pos": indices[:, 0].astype(int),
+                "treat_pos": indices[:, 0].astype(int),  # row index in treateed DataFrame
                 "dist": distances[:, 0].astype(float),
             }
         )
@@ -321,3 +321,145 @@ def match_ps(
 
     except Exception as exc:
         raise RuntimeError(f"match_ps failed: {exc}") from exc 
+    
+
+def check_balance(
+    df_before: pd.DataFrame,
+    df_after: pd.DataFrame,
+    covariates: list[str],
+    treatment_col: str = "treatment",
+) -> pd.DataFrame:
+    """
+    Covariate balance diagnostics via Standardized Mean Difference (SMD).
+    Parameters
+    ----------
+    df_before : pd.DataFrame
+        full data before matching
+    df_after : pd.DataFrame
+        matched data after matching
+    covariates : list[str]
+        covariate column names
+    treatment_col : str
+        default="treatment"
+    ----------
+    Returns
+    -------
+    balance_report : pd.DataFrame
+        - columns: [covariate, smd_before, smd_after, reduction_pct]
+        - shape: (len(covariates), 4)
+    """
+    try:
+        # ------------------------------------------------------
+        # 1) Defensive validation
+        # ------------------------------------------------------
+        if df_before is None or df_after is None:
+            raise ValueError("df_before and df_after must not be None")
+        if not isinstance(df_before, pd.DataFrame) or not isinstance(df_after, pd.DataFrame):
+            raise TypeError("df_before and df_after must be pandas.DataFrame")
+        if df_before.empty or df_after.empty:
+            raise ValueError("df_before and df_after must not be empty")
+        if covariates is None or not isinstance(covariates, list) or len(covariates) == 0:
+            raise ValueError("covariates must be a non-empty list[str]")
+        if treatment_col not in df_before.columns or treatment_col not in df_after.columns:
+            raise ValueError(f"Missing treatment column: {treatment_col}")
+
+        # Ensure treatment is binary in both frames
+        t_before = pd.to_numeric(df_before[treatment_col], errors="coerce")
+        t_after = pd.to_numeric(df_after[treatment_col], errors="coerce")
+        if t_before.isnull().any() or t_after.isnull().any():
+            raise ValueError("treatment column contains NaN/non-numeric values; expected 0/1")
+        if not set(pd.unique(t_before)).issubset({0, 1}):
+            raise ValueError("df_before treatment must be binary (0/1)")
+        if not set(pd.unique(t_after)).issubset({0, 1}):
+            raise ValueError("df_after treatment must be binary (0/1)")
+        
+        # ------------------------------------------------------
+        # 2) Helper: SMD computation (vectorized group stats)
+        # ------------------------------------------------------
+        def _smd(
+                frame: pd.DataFrame, 
+                cov: str
+        ) -> float:
+            """
+            Standardized Mean Difference (SMD) computation.
+            Parameters
+            ----------
+            frame : pd.DataFrame
+                input DataFrame
+            cov : str
+                covariate column name
+            Returns
+            -------
+            float
+                SMD value
+            """
+            x = pd.to_numeric(frame[cov], errors="coerce")
+            t = pd.to_numeric(frame[treatment_col], errors="coerce").astype(int)
+
+            if x.isnull().any():
+                raise ValueError(f"Covariate contains NaN after coercion: {cov}")
+
+            x_t = x.loc[t == 1]
+            x_c = x.loc[t == 0]
+            if len(x_t) == 0 or len(x_c) == 0:
+                raise ValueError(f"Both treated/control must be non-empty for SMD: {cov}")
+
+            mu_t = float(x_t.mean())
+            mu_c = float(x_c.mean())
+            sd_t = float(x_t.std(ddof=1))
+            sd_c = float(x_c.std(ddof=1))
+
+            pooled = np.sqrt((sd_t**2 + sd_c**2) / 2.0)
+
+            # Division-by-zero defense: 
+            # If pooled == 0, treat SMD as 0 when means equal; else huge imbalance.
+            if pooled == 0.0:
+                return 0.0 if mu_t == mu_c else float("inf")
+
+            return float(abs(mu_t - mu_c) / pooled)
+
+        # ------------------------------------------------------
+        # 3) Core Report
+        # ------------------------------------------------------
+        results = []
+        for cov in covariates:
+            if cov not in df_before.columns:
+                raise ValueError(f"Covariate missing in df_before: {cov}")
+            if cov not in df_after.columns:
+                raise ValueError(f"Covariate missing in df_after: {cov}")
+
+            smd_b = _smd(df_before, cov)
+            smd_a = _smd(df_after, cov)
+
+            # Division-by-zero defense: 
+            # if smd_before == 0, reduction_pct = 0 (not inf)
+            if smd_b > 0 and np.isfinite(smd_b):
+                reduction_pct = float((1.0 - (smd_a / smd_b)) * 100.0)
+            else:
+                reduction_pct = 0.0
+
+            results.append(
+                {
+                    "covariate": cov,
+                    "smd_before": float(smd_b),
+                    "smd_after": float(smd_a),
+                    "reduction_pct": float(reduction_pct),
+                }
+            )
+
+        balance_report = pd.DataFrame(results, columns=["covariate", "smd_before", "smd_after", "reduction_pct"])
+        assert len(balance_report) == len(covariates), "Covariate count mismatch"
+
+        # ------------------------------------------------------
+        # 4) Required Assertions
+        # ------------------------------------------------------
+        # After matching: all covariates should be balanced (SMD < 0.1)
+        assert (balance_report["smd_after"] < 0.1).all(), "Matched covariates not balanced"
+        # RCT expectation: even before matching, covariates should already be balanced (SMD < 0.1)
+        assert (balance_report["smd_before"] < 0.1).all(), "Pre-matching covariates not balanced, RCT randomization may be problematic"
+
+        return balance_report
+
+    except Exception as exc:
+        raise RuntimeError(f"check_balance failed: {exc}") from exc
+
