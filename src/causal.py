@@ -1,13 +1,15 @@
 # ===============================================
 # Causal inference utilities (Phase 2).
 # ===============================================
-# This module implements MVP 2.1: propensity score estimation via Logistic Regression.
 
 from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, NearestNeighbors
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
 
 
 def estimate_ps(
@@ -32,24 +34,6 @@ def estimate_ps(
         Values are clipped into (0.01, 0.99) to avoid division-by-zero in IPW / X-Learner.
     LogisticRegression
         fitted model object for diagnostics
-
-    DQ Defenses
-    ----------
-    - Clip boundaries: ps in [0.01, 0.99]
-    - Model convergence: model.n_iter_[0] < 1000 (when fitted)
-    - Input validation: X must not contain treatment/conversion/spend
-
-    Verification Asserts (executed when applicable)
-    -----------------------------------------------
-      ASSERT len(ps) == len(T), "PS vector length mismatch"
-      ASSERT ps.min() >= 0.01, "PS contains too-small values; clip failed"
-      ASSERT ps.max() <= 0.99, "PS contains too-large values; clip failed"
-      ASSERT model.n_iter_[0] < 1000, "Logistic Regression did not converge"
-
-    RCT-specific validation (applied only when treatment ratio is consistent with 2:1)
-    -------------------------------------------------------------------------------
-      ASSERT 0.60 <= ps.mean() <= 0.72, "PS mean deviates from treatment ratio; check feature matrix"
-      ASSERT ps.std() < 0.10, "PS std too large; RCT data should not be strongly predictable"
     """
 
     # -------------------------------------
@@ -158,3 +142,182 @@ def estimate_ps(
 
     return ps, model
 
+from __future__ import annotations
+
+from pathlib import Path
+from datetime import datetime, timezone, timedelta
+
+import numpy as np
+import pandas as pd
+from sklearn.neighbors import NearestNeighbors
+
+
+def match_ps(
+    df: pd.DataFrame,
+    ps_col: str = "ps",
+    treatment_col: str = "treatment",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Propensity Score Matching (1:1 nearest neighbor with no replacement).
+    Parameters
+    ----------
+    df : pd.DataFrame
+        contains treatment, conversion, spend, covariates, and ps column.
+    ps_col : str
+        default="ps"
+    treatment_col : str
+        default="treatment"
+    random_state : int
+        default=42
+        kept for API symmetry; KD-tree NN here is deterministic
+    Returns
+    -------
+    matched_df : pd.DataFrame
+        - includes all original columns + "match_id" (int)
+        - Treatment and Control sample sizes are equal
+        - each Treatment unit is used at most once (no replacement)
+        - unmatched units are dropped
+        - caliper computed internally: 0.2 × std(ps)
+        - persisted to: data/processed/hillstrom_matched.csv (index=False)
+    """
+    try:
+        # ------------------------------------------------------
+        # 1) Defensive validation (fail fast, explicit messages)
+        # ------------------------------------------------------
+        if df is None or not isinstance(df, pd.DataFrame):
+            raise TypeError("df must be a pd.DataFrame")
+
+        if df.empty:
+            raise ValueError("df cannot be empty")
+
+        if ps_col not in df.columns:
+            raise ValueError(f"Missing required ps column: {ps_col}")
+
+        if treatment_col not in df.columns:
+            raise ValueError(f"Missing required treatment column: {treatment_col}")
+
+        ps = pd.to_numeric(df[ps_col], errors="coerce")
+        if ps.isnull().any():
+            raise ValueError(f"{ps_col} contains NaN or non-numeric values; matching requires numeric propensity scores")
+        if not np.isfinite(ps.to_numpy(dtype=float, copy=False)).all():
+            raise ValueError(f"{ps_col} contains inf/-inf; matching requires finite propensity scores")
+
+        T = pd.to_numeric(df[treatment_col], errors="coerce")
+        if T.isnull().any():
+            raise ValueError(f"{treatment_col} contains NaN or non-numeric values; treatment must be 0/1")
+        unique_t = set(pd.unique(T))
+        if not unique_t.issubset({0, 1}):
+            raise ValueError(f"{treatment_col} must be binary (0/1). Found: {sorted(unique_t)}")
+
+        treated = df.loc[T == 1].copy()
+        control = df.loc[T == 0].copy()
+
+        if treated.empty or control.empty:
+            raise ValueError("Both treated and control groups must be non-empty for matching")
+
+        # ----------------------------------------------------
+        # 2) Core Matching Logic
+        # ----------------------------------------------------
+        # Caliper scaling by ps dispersion reduces caller error and stabilizes match quality across datasets.
+        # Internal caliper: 0.2 × std(ps) (global std, ddof=0 to match numpy default)
+        # copy=False: improves performance, read-only view is enough
+        caliper = 0.2 * float(np.std(ps.to_numpy(dtype=float, copy=False), ddof=0))
+        if not np.isfinite(caliper) :
+            raise ValueError("Computed caliper is non-finite; check PS distribution")
+        if caliper <= 0.0:
+            raise ValueError("Computed caliper is non-positive; check PS distribution")
+
+        # KD-tree nearest neighbor
+        # For each Control sample, find nearest Treated sample in PS space.
+        nn = NearestNeighbors(n_neighbors=1, algorithm="kd_tree")
+        nn.fit(pd.DataFrame({
+                    ps_col: pd.to_numeric(treated[ps_col], errors="raise").to_numpy(dtype=float)
+                }
+            )
+               
+        )
+
+        distances, indices = nn.kneighbors(
+            pd.DataFrame({ps_col: pd.to_numeric(control[ps_col], errors="raise").to_numpy(dtype=float)}),
+            return_distance=True,
+        )
+
+        # Build candidate pairs (vectorized)
+        # indices are positions into treated (row-order of treated DataFrame)
+        pairs = pd.DataFrame(
+            {
+                "ctrl_index": control.index.to_numpy(),
+                "treat_pos": indices[:, 0].astype(int),
+                "dist": distances[:, 0].astype(float),
+            }
+        )
+
+        # Filter by caliper
+        pairs = pairs.loc[pairs["dist"] <= caliper].copy()
+
+        # ------------------------------------------------------
+        # 3) No-replacement constraint (vectorized, no Python loop)
+        # ------------------------------------------------------
+        # - Each Control appears once by construction.
+        # - Enforce each Treated used at most once by keeping the smallest-distance pair per treat_pos.
+        # Sort by distance ascending
+        # mergesort: stable, selects the first duplicate, not the last, random
+        pairs = pairs.sort_values("dist", ascending=True, kind="mergesort")
+        pairs = pairs.drop_duplicates(subset=["treat_pos"], keep="first")
+
+        # Map treat_pos -> treated index
+        treated_index_array = treated.index.to_numpy()
+        pairs["treat_index"] = treated_index_array[pairs["treat_pos"].to_numpy(dtype=int)]
+
+        # Assign match_id (dense 0..k-1)
+        pairs = pairs.reset_index(drop=True)
+        pairs["match_id"] = pairs.index.to_numpy(dtype=int)
+
+        # Construct matched_df: include BOTH rows (control + matched treated) per match_id
+        ctrl_rows = pairs[["ctrl_index", "match_id"]].rename(columns={"ctrl_index": "row_index"}).copy()
+        ctrl_rows["is_treated_row"] = 0
+
+        treat_rows = pairs[["treat_index", "match_id"]].rename(columns={"treat_index": "row_index"}).copy()
+        treat_rows["is_treated_row"] = 1
+
+        stacked = pd.concat([ctrl_rows, treat_rows], axis=0, ignore_index=True)
+        # Stable ordering: match_id, then control first, treated second
+        stacked = stacked.sort_values(["match_id", "is_treated_row"], ascending=[True, True], kind="mergesort")
+
+        matched_df = df.loc[stacked["row_index"].to_list()].copy()
+        matched_df["match_id"] = stacked["match_id"].to_numpy(dtype=int)
+
+        # ======================================================
+        # 4) DQ checks + required asserts
+        # ======================================================
+        n_treated = int(pd.to_numeric(matched_df[treatment_col], errors="coerce").sum())
+        n_control = int(len(matched_df) - n_treated)
+
+        # Technical Note: Reuse inflates dependence and understates variance; no-replacement improves representativeness under 1:1 design.
+
+        assert n_treated == n_control, "matched T/C sample volumes not equal"
+
+        # Match rate check: number of matched controls equals number of pairs
+        matched_controls = int(len(pairs))
+        assert matched_controls >= int(0.90 * len(control)), "matching rate too low, check caliper"
+
+        # Ensure original indices are unique in matched_df (no duplicate index -> no-replacement for row selection)
+        assert matched_df.index.is_unique, "duplicate index, no-replacement for row selection"
+        assert "match_id" in matched_df.columns, "lack of match_id column"
+
+        # Additional structural sanity (engineering-grade)
+        assert matched_df[["match_id"]].notnull().all().all(), "match_id contains NaN"
+        assert matched_df["match_id"].dtype.kind in {"i", "u"}, "match_id must be an integer dtype"
+
+        # ------------------------------------------------------
+        # 5) Persistence (architecture review adjustment #3)
+        # ------------------------------------------------------
+        out_path = Path("data/processed/hillstrom_matched.csv")
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        matched_df.to_csv(out_path, index=False)
+
+        return matched_df
+
+    except Exception as exc:
+        raise RuntimeError(f"match_ps failed: {exc}") from exc 
