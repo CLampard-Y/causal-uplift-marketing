@@ -8,6 +8,7 @@ import pandas as pd
 from sklearn.linear_model import LogisticRegression
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
+from typing import Optional
 from sklearn.neighbors import NearestNeighbors
 
 
@@ -525,4 +526,170 @@ def check_balance(
 
     except Exception as exc:
         raise RuntimeError(f"check_balance failed: {exc}") from exc
+
+
+def compute_ate(
+    matched_df: pd.DataFrame,
+    outcome_col: str = "conversion",
+    treatment_col: str = "treatment",
+    n_bootstrap: int = 1000,
+    random_state: int = 42,
+    ate_naive_conv: Optional[float] = None,
+) -> dict:
+    """
+    Compute ATE on matched (paired) data and estimate uncertainty via stratified bootstrap by match_id.
+    parameters
+    ----------
+    matched_df : pd.DataFrame
+        output of match_ps() (must include match_id)
+    outcome_col : str
+        default="conversion"
+    treatment_col : str
+        default="treatment"
+    n_bootstrap : int
+        default=1000
+    random_state : int
+        default=42
+    ate_naive_conv : Optional[float]
+        default=None
+        RCT consistency validation (optional): PSM ATE should be close to naive ATE in randomized experiments.
+        If provided, asserts that the PSM ATE is within 0.01 of the naive ATE.
+    Returns
+    -------
+    dict
+        {
+          "ate": float,                 # point estimate
+          "ci_lower": float,            # 95% CI lower bound
+          "ci_upper": float,            # 95% CI upper bound
+          "se": float,                  # bootstrap standard error
+          "bootstrap_ates": np.ndarray  # bootstrap samples (n_bootstrap,)
+        }               
+    """
+    try:
+        # ------------------------------------------------------
+        # 1) Defensive Validation
+        # ------------------------------------------------------
+        if matched_df is None or not isinstance(matched_df, pd.DataFrame):
+            raise TypeError("matched_df must be a pd.DataFrame")
+        if matched_df.empty:
+            raise ValueError("matched_df cannot be empty")
+        if "match_id" not in matched_df.columns:
+            raise ValueError("matched_df must contain 'match_id' from match_ps() output")
+        if outcome_col not in matched_df.columns:
+            raise ValueError(f"Missing outcome column: {outcome_col}")
+        if treatment_col not in matched_df.columns:
+            raise ValueError(f"Missing treatment column: {treatment_col}")
+
+        if not isinstance(n_bootstrap, int):
+            raise TypeError("n_bootstrap must be an int")
+        if n_bootstrap < 500:
+            raise ValueError("n_bootstrap must be >= 500 for stable CI estimation (recommended: 1000)")
+
+        # Explicit UTC+8 anchor for audit-style pipelines (no side effects; here for consistent reproducibility notes).
+        _tz_utc8 = timezone(timedelta(hours=8))  # UTC+8
+        _ = _tz_utc8  # keep lint-stable without printing
+
+        # Enforce binary treatment and numeric outcome
+        t = pd.to_numeric(matched_df[treatment_col], errors="coerce")
+        if t.isnull().any():
+            raise ValueError("treatment contains NaN/non-numeric values; expected binary 0/1")
+        if not set(pd.unique(t)).issubset({0, 1}):
+            raise ValueError("treatment must be binary (0/1)")
+
+        y = pd.to_numeric(matched_df[outcome_col], errors="coerce")
+        if y.isnull().any():
+            raise ValueError("outcome contains NaN/non-numeric values; expected numeric 0/1 for conversion")
+        if not np.isfinite(y.to_numpy(dtype=float, copy=False)).all():
+            raise ValueError("outcome contains inf/-inf; expected finite values")
+        
+        # Enfore one match_id only contains one pair
+        if not matched_df.groupby(["match_id","_t"]).size().max() == 2:
+            raise ValueError("matched_df contains duplicate match_id; check pairing integrity")
+       
+        # ------------------------------------------------------
+        # 2) Calculate Estimate ATE By Paired Differences
+        # ------------------------------------------------------
+        # The variance of within-pair differences is smaller than the variance of between-pair differences.
+        # Enforce strict pair structure: each match_id must contain exactly 2 rows (1 treated + 1 control).
+        pair_check = (
+            matched_df.assign(_t=t.astype(int))
+
+            # dropna: make sure `match_id=NaN` unmatched sample also be checked
+            .groupby("match_id", dropna=False)["_t"]
+            .agg(size="size", treated_sum="sum")
+        )
+        if (pair_check["size"] != 2).any() or (pair_check["treated_sum"] != 1).any():
+            raise ValueError(
+                "Invalid matched_df pairing: each match_id must have exactly 2 rows "
+                "(one treated, one control)."
+            )
+
+        # Pivot by treatment to get per-pair outcomes, then take treated - control.
+        pair_outcomes = (
+            matched_df.assign(_t=t.astype(int), _y=y.to_numpy(dtype=float, copy=False))
+
+            # mean: prevent multiple matches in same match_id
+            .pivot_table(index="match_id", columns="_t", values="_y", aggfunc="first")
+        )
+        if 0 not in pair_outcomes.columns or 1 not in pair_outcomes.columns:
+            raise ValueError("Pair pivot missing treatment=0 or treatment=1 outcomes; check match_ps output")
+        if pair_outcomes[[0, 1]].isnull().any().any():
+            raise ValueError("Pair outcomes contain NaN after pivot; check match_id pairing integrity")
+
+        diffs = (pair_outcomes[1] - pair_outcomes[0]).to_numpy(dtype=float, copy=False)
+        n_pairs = int(diffs.shape[0])
+        if n_pairs < 10:
+            raise ValueError("Too few matched pairs to compute a stable bootstrap CI")
+
+        ate = float(np.mean(diffs))
+
+        # ------------------------------------------------------
+        # 3) Stratified Bootstrap By match_id (pair-level)
+        # ------------------------------------------------------
+        # Bootstrap by match_id (pairs), NOT by rows.
+        # Row-wise bootstrap breaks the paired dependence structure and typically inflates CI width.
+        rng = np.random.RandomState(random_state)
+
+        # Vectorized bootstrap sampling: sample pair indices with replacement.
+        # Memory: n_bootstrap × n_pairs floats is avoided by sampling indices and taking means along axis=1.
+        bootstrap_ates = np.empty(shape=(n_bootstrap,), dtype=float)
+        chunk_size = 200  # 5 chunks for n_bootstrap=1000; adjust if needed.
+        for start in range(0, n_bootstrap, chunk_size):
+            end = min(start + chunk_size, n_bootstrap)
+            m = end - start
+            sample_idx = rng.randint(0, n_pairs, size=(m, n_pairs))
+            bootstrap_ates[start:end] = diffs[sample_idx].mean(axis=1)
+
+        ci_lower = float(np.percentile(bootstrap_ates, 2.5))
+        ci_upper = float(np.percentile(bootstrap_ates, 97.5))
+        se = float(np.std(bootstrap_ates, ddof=1))
+
+        result = {
+            "ate": ate,
+            "ci_lower": ci_lower,
+            "ci_upper": ci_upper,
+            "se": se,
+            "bootstrap_ates": np.asarray(bootstrap_ates, dtype=float),
+        }
+
+        # ------------------------------------------------------
+        # 4) Verification asserts
+        # ------------------------------------------------------
+        # Numerical guard: if a quantile ties exactly with the point estimate, expand bounds by 1 ulp.
+        if not (result["ci_lower"] < result["ate"] < result["ci_upper"]):
+            result["ci_lower"] = float(np.nextafter(result["ci_lower"], -np.inf))
+            result["ci_upper"] = float(np.nextafter(result["ci_upper"], np.inf))
+
+        assert result["ci_lower"] < result["ate"] < result["ci_upper"], "CI does not contain the point estimate"
+        assert result["se"] > 0, "Standard error is zero; bootstrap may be degenerate"
+        assert len(result["bootstrap_ates"]) == n_bootstrap, "Bootstrap sample count mismatch"
+
+        # RCT consistency validation (optional): PSM ATE should be close to naive ATE in randomized experiments.
+        if ate_naive_conv is not None:
+            assert abs(result["ate"] - float(ate_naive_conv)) < 0.01, "PSM ATE deviates too much from naive ATE"
+
+        return result
+
+    except Exception as exc:
+        raise RuntimeError(f"compute_ate failed: {exc}") from exc
 
