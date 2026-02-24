@@ -50,21 +50,34 @@ uplift:
   base_model: "xgboost"
   n_estimators: 100
   max_depth: 5
-  # Required in production-style training to prevent overfitting
-  early_stopping_rounds: 10
-  # Hold-out ratio for validation-based early stopping
-  val_ratio: 0.2
-  # Validation split strategy to keep treatment/control representation stable
-  split_strategy: "stratified_shuffle"
-  # Primary stratification key for uplift validity
-  stratify_by: "treatment"
-  # Optional guard: if any cohort falls below this count in validation, trigger resplit/fallback
-  min_group_size_in_val: 100
-  # Model selection target should align with uplift business objective
-  eval_metric_for_selection: "auuc"
 
-  # ----- Phase 2 optional safeguards (currently disabled) -----
-  # Enable when entering Phase 2 modeling with stronger robustness needs
+  # ==========================
+  # Optinal (Not used in uplift section)
+  # ==========================
+  # Required in production-style training to prevent overfitting
+  #early_stopping_rounds: 10
+
+  # Hold-out ratio for validation-based early stopping
+  #val_ratio: 0.2
+
+  # Validation split strategy to keep treatment/control representation stable
+  #split_strategy: "stratified_shuffle"
+
+  # Primary stratification key for uplift validity
+  #stratify_by: "treatment"
+
+  # Optional guard: if any cohort falls below this count in validation, trigger resplit/fallback
+  #min_group_size_in_val: 100
+  
+  # Model selection target should align with uplift business objective
+  #eval_metric_for_selection: "auuc"
+
+  # =================================================================================
+  # ----- Phase 2 optional safeguards (disabled) -----
+  # All these parameters are embedded in function to avoide:
+  #   1. Over-fitting 
+  #   2. Over-complicating 
+  # =================================================================================
   # imbalance_handling: true           # automatically rebalance minority classes
   # pos_weight_strategy: "auto"        # options: auto | manual
 

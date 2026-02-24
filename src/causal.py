@@ -602,9 +602,8 @@ def compute_ate(
         if not np.isfinite(y.to_numpy(dtype=float, copy=False)).all():
             raise ValueError("outcome contains inf/-inf; expected finite values")
         
-        # Enfore one match_id only contains one pair
-        if not matched_df.groupby(["match_id","_t"]).size().max() == 2:
-            raise ValueError("matched_df contains duplicate match_id; check pairing integrity")
+        # NOTE: Do NOT group by a temporary column name (e.g., "_t") before it is created.
+        # Pair integrity is enforced below via an explicit per-match_id structure check.
        
         # ------------------------------------------------------
         # 2) Calculate Estimate ATE By Paired Differences
