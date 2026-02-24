@@ -584,3 +584,179 @@ def fit_x_learner(
 
     except Exception as exc:
         raise RuntimeError(f"fit_x_learner failed: {exc}") from exc
+
+
+def compute_qini(
+    cate: np.ndarray,
+    T: pd.Series,
+    Y: pd.Series,
+    n_bins: int = 20,
+) -> dict:
+    """
+    Compute Qini curve / AUUC on a test set.
+    Parameters
+    ----------
+    cate : np.ndarray
+        CATE estimates on the *test set*, shape (N,). Higher means "more uplift", so we sort descending.
+    T : pd.Series
+        Treatment indicator on test set, binary 0/1, shape (N,).
+    Y : pd.Series
+        Outcome (conversion) on test set, binary 0/1, shape (N,).
+    n_bins : int
+        Number of bins to use for the histogram.
+        Default is 20.
+    Returns
+    -------
+    qini : dict
+        Qini curve / AUUC on a test set .   
+        dict with:
+        - qini_x: list[float]   targeting fractions from 0 to 1
+        - qini_y: list[float]   cumulative incremental conversions (Qini curve)
+        - random_y: list[float] random baseline line
+        - auuc: float           area under qini curve
+        - random_auuc: float    area under random line
+        - qini_coefficient: float  auuc - random_auuc
+    """
+    try:
+        # -------------------------------------------
+        # 1) Validation
+        # -------------------------------------------
+        cate_arr = np.asarray(cate, dtype=float).reshape(-1)
+        if cate_arr.ndim != 1:
+            raise ValueError("cate must be a 1D array")
+        if cate_arr.size == 0:
+            raise ValueError("cate cannot be empty")
+        if not np.isfinite(cate_arr).all():
+            raise ValueError("cate contains NaN/inf values")
+        if not isinstance(n_bins, int) or n_bins <= 1:
+            raise ValueError("n_bins must be an int >= 2")
+
+        # Type conversion
+        t_series = T if isinstance(T, pd.Series) else pd.Series(T)
+        y_series = Y if isinstance(Y, pd.Series) else pd.Series(Y)
+
+        if pd.api.types.is_bool_dtype(t_series):
+            t_series = t_series.astype(int)
+        if pd.api.types.is_bool_dtype(y_series):
+            y_series = y_series.astype(int)
+
+        # coerce: Convert not-a-number values to NaN
+        t = pd.to_numeric(t_series, errors="coerce").astype(float)
+        y = pd.to_numeric(y_series, errors="coerce").astype(float)
+
+        # Check for NaN/non-numeric values
+        if t.isnull().any():
+            raise ValueError("T contains NaN/non-numeric values")
+        if y.isnull().any():
+            raise ValueError("Y contains NaN/non-numeric values")
+
+        t = t.astype(int)
+        y = y.astype(int)
+
+        if len(t) != len(cate_arr) or len(y) != len(cate_arr):
+            raise ValueError("Length mismatch among cate, T, Y")
+        if not set(pd.unique(t)).issubset({0, 1}):
+            raise ValueError("T must be binary (0/1)")
+        if not set(pd.unique(y)).issubset({0, 1}):
+            raise ValueError("Y must be binary (0/1)")
+
+        n = int(len(cate_arr))
+        n_t = int((t == 1).sum())
+        n_c = int(n - n_t)
+        if n_t <= 0 or n_c <= 0:
+            raise ValueError("Both treated and control groups must be non-empty")
+
+        # -------------------------------------------
+        # 2) Sort Uplift (CATE) Descending
+        # -------------------------------------------
+        # Sort by predicted uplift (CATE) descending
+        # mergesort: stable, reproducible, O(N log N) sort
+        # -cate_arr: descending order by CATE
+        sorted_idx = np.argsort(-cate_arr, kind="mergesort")
+        t_sorted = t.to_numpy(dtype=int, copy=False)[sorted_idx]
+        y_sorted = y.to_numpy(dtype=int, copy=False)[sorted_idx]
+
+        # Total incremental conversions for the full population (random baseline endpoint)
+        y_t_rate = float(y[t == 1].mean())
+        y_c_rate = float(y[t == 0].mean())
+        total_uplift = (y_t_rate - y_c_rate) * float(n_c)
+
+        qini_x: list[float] = [0.0]
+        qini_y: list[float] = [0.0]
+        random_y: list[float] = [0.0]
+
+        # -------------------------------------------
+        # 3) Construct Bin Boundaries
+        # -------------------------------------------
+        # Bin boundaries: cumulative top-k fractions
+        # Using linspace avoids rounding drift and guarantees the last point hits N
+        # Why not np.arrange(0, n, n // n_bins):
+        #   When n can no be evenly divided by n_bins, the last bin will be smaller
+        boundaries = np.linspace(0, n, n_bins + 1)
+        boundaries = np.round(boundaries).astype(int)
+
+        # Ensure boundaries are non-decreasing and within [0, n]
+        boundaries[0] = 0
+        boundaries[-1] = n
+
+        # -------------------------------------------
+        # 4) Compute Bins 
+        # -------------------------------------------
+        # Ensure boundaries are non-decreasing and within [0, n]
+        boundaries = np.clip(boundaries, 0, n)
+        for k in range(1, n_bins + 1):
+            end = int(boundaries[k])
+            if end <= 0:
+                fraction = float(k) / float(n_bins)
+                qini_x.append(fraction)
+                qini_y.append(0.0)
+                random_y.append(total_uplift * fraction)
+                continue
+
+            t_k = t_sorted[:end]
+            y_k = y_sorted[:end]
+
+            n_t_k = int(t_k.sum())
+            n_c_k = int(len(t_k) - n_t_k)
+
+            # DQ: division-by-zero guard
+            if n_t_k > 0 and n_c_k > 0:
+                # Phase2.md formula (keep denominators as FULL-population N_T/N_C):
+                # uplift_k = (sum(Y_treat_topk)/N_T - sum(Y_ctrl_topk)/N_C) * N_C
+                sum_y_t_k = float(y_k[t_k == 1].sum())
+                sum_y_c_k = float(y_k[t_k == 0].sum())
+                uplift_k = (sum_y_t_k / float(n_t) - sum_y_c_k / float(n_c)) * float(n_c)
+            else:
+                uplift_k = 0.0
+
+            fraction = float(k) / float(n_bins)
+            qini_x.append(fraction)
+            qini_y.append(float(uplift_k))
+            random_y.append(float(total_uplift) * fraction)
+
+        # -------------------------------------------
+        # 5) Compute AUUC and Qini Coefficient
+        # -------------------------------------------
+        # NumPy 2.x: np.trapz was removed in favor of np.trapezoid.
+        auuc = float(np.trapezoid(np.asarray(qini_y, dtype=float), np.asarray(qini_x, dtype=float)))
+        random_auuc = float(np.trapezoid(np.asarray(random_y, dtype=float), np.asarray(qini_x, dtype=float)))
+        qini_coefficient = float(auuc - random_auuc)
+
+        result = {
+            "qini_x": [float(v) for v in qini_x],
+            "qini_y": [float(v) for v in qini_y],
+            "random_y": [float(v) for v in random_y],
+            "auuc": auuc,
+            "random_auuc": random_auuc,
+            "qini_coefficient": qini_coefficient,
+        }
+
+        # Required assertions
+        assert len(result["qini_x"]) == n_bins + 1, "Qini edge points count mismatch"
+        assert result["qini_x"][-1] == 1.0, "Qini edge points not at 100%"
+        assert abs(result["qini_y"][-1] - result["random_y"][-1]) < 1.0, "Qini edge points not converging"
+
+        return result
+
+    except Exception as exc:
+        raise RuntimeError(f"compute_qini failed: {exc}") from exc
