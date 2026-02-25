@@ -39,8 +39,9 @@ def segment_users(
         CATE threshold for "high CATE"
         default=50.0
     baseline_threshold : float
-        baseline conversion rate for "high baseline" ( 50% + threshold )
-        default=0.5
+        Percentile cutoff within the high-CATE subgroup to define "high baseline".
+        With default=0.5, users whose baseline_prob >= P50 of the high-CATE group
+        are classified as Sure Things (top 50% baseline within high-CATE users).
     Returns
     -------
     segments_df : pd.DataFrame
@@ -154,23 +155,88 @@ def segment_users(
         # -----------------------------------------
         # 5) Quadrant Assignment.
         # -----------------------------------------
+        cate_high = cate_arr >= cate_threshold
+
+        """ 
+        NOTICE: THIS IS THE OLD STRATEGY A
+
+        ISSUE:
+            1. Categorized users into "Persuadables" once CATE cate >= cate_threshold, neglect baseline_prob
+            2. Contribute to "Sure Things" sample is low (even 0 in this dataset)
+
+        Applicable Scenarios:
+            Increase conversion rates is the only one goal, neglect treatment cost
+            (Even if the user would have converted it themselves)
+
+        This is not what we want: 
+            1. Limited budge, require precise treatment
+            2. Uplift Modeling core objective: maximize treatment ROI
+
+        
         # Business-aligned interpretation:
         # - Sleeping Dogs: cate < 0 (negative treatment effect)
         # - Persuadables: cate >= cate_threshold (high uplift)
         # - Sure Things: cate >= 0 but not high uplift, and baseline is high
         # - Lost Causes: cate >= 0 but not high uplift, and baseline is low
-        
-
-        # Baseline high/low threshold: relative to global control conversion rate.
-        baseline_high = baseline_prob >= (1.0 +float(baseline_threshold)) * control_conversion_rate
-        cate_high = cate_arr >= cate_threshold
-
+    
         segments = np.empty(n, dtype=object)
         segments[:] = "Lost Causes"
         segments[cate_arr < 0.0] = "Sleeping Dogs"
         segments[(cate_arr >= 0.0) & cate_high] = "Persuadables"
         segments[(cate_arr >= 0.0) & (~cate_high) & baseline_high] = "Sure Things"
         segments[(cate_arr >= 0.0) & (~cate_high) & (~baseline_high)] = "Lost Causes"
+        """
+
+        """
+        NOTICE: THIS IS THE OLD STRATEGY B
+
+        ISSUE: wrong setting of baseline_high
+            1. In this dataset, the baseline_prob of user whose cate > cate_threshold is far lower than control_conversion_rate
+            2. Contributes to "Sure Things" sample is still 0
+
+
+        # Business-aligned interpretation: 
+        # - Sleeping Dogs:  CATE < 0  (marketing hurts conversion)
+        # - Persuadables:   CATE >= threshold AND baseline low  (true marginal users)
+        # - Sure Things:    CATE >= threshold AND baseline high (would convert anyway)
+        # - Lost Causes:    CATE in [0, threshold)             (low uplift)
+
+         baseline_high = baseline_prob >= baseline_pct
+        
+        """
+
+        # 基线高低阈值：在高 CATE 子群内部使用百分位数分割
+        # 为什么用百分位而非绝对倍数阈值：
+        #   baseline_prob 是按 CATE 分位数分桶后计算的控制组转化率。
+        #   高 CATE 分桶本身就意味着"处理效应大"，这恰恰说明该桶的控制组转化率低
+        #   （正是因为基线低，处理后提升才大，CATE 才高）。
+        #   因此，在高 CATE 子群内部使用绝对阈值（如之前旧策略 A,B 中使用的 1.5 倍全局控制组转化率）
+        #   永远无法触达，导致 Sure Things 为空。
+        #   使用子群内百分位数能自适应该子群的条件分布，产生有意义的 Sure Things 分割。
+        #
+        # baseline_threshold 参数语义（默认 0.5）：
+        #   "在高 CATE 用户中，baseline_prob 排名前 (1 - baseline_threshold) 的用户
+        #    被识别为 Sure Things（即使不营销也有较高自然转化倾向的用户）"
+        #   0.5 → 高 CATE 子群内 baseline 排名前 50% = Sure Things
+        #   0.3 → 高 CATE 子群内 baseline 排名前 70% = Sure Things（更宽松）
+        #   0.7 → 高 CATE 子群内 baseline 排名前 30% = Sure Things（更严格）
+        
+        high_cate_baseline = baseline_prob[cate_high & (cate_arr >= 0.0)]
+        if len(high_cate_baseline) > 0:
+            baseline_pct = float(np.percentile(
+                high_cate_baseline,
+                float(baseline_threshold) * 100.0,
+            ))
+        else:
+            baseline_pct = float(control_conversion_rate)
+        baseline_high = baseline_prob >= baseline_pct
+
+        segments = np.empty(n, dtype=object)
+        segments[:] = "Lost Causes"
+        segments[cate_arr < 0.0] = "Sleeping Dogs"
+        segments[(cate_arr >= 0.0) & cate_high & (~baseline_high)] = "Persuadables"
+        segments[(cate_arr >= 0.0) & cate_high & baseline_high] = "Sure Things"
+        segments[(cate_arr >= 0.0) & (~cate_high)] = "Lost Causes"
 
         segments_df = pd.DataFrame(
             {
