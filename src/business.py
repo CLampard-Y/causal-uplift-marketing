@@ -19,6 +19,7 @@ def segment_users(
     method: Literal["quantile", "threshold"] = "quantile",
     cate_threshold_pct: float = 50.0,
     baseline_threshold: float = 0.5,
+    n_baseline_bins: int = 20,
 ) -> pd.DataFrame:
     """
     Segment users into four business quadrants using a CATE vector.
@@ -42,6 +43,11 @@ def segment_users(
         Percentile cutoff within the high-CATE subgroup to define "high baseline".
         With default=0.5, users whose baseline_prob >= P50 of the high-CATE group
         are classified as Sure Things (top 50% baseline within high-CATE users).
+    n_baseline_bins : int
+        Number of CATE-quantile bins for computing baseline_prob.
+        Default=20 balances statistical robustness (each bin ~3200 users in Hillstrom)
+        and discretization granularity. For small samples (<10K), consider reducing
+        to max(10, n // 1000).
     Returns
     -------
     segments_df : pd.DataFrame
@@ -95,6 +101,8 @@ def segment_users(
             raise ValueError("cate_threshold_pct must be in (0, 100]")
         if not (float(baseline_threshold) > 0.0):
             raise ValueError("baseline_threshold must be > 0")
+        if not (2 <= int(n_baseline_bins) <= 100):
+            raise ValueError("n_baseline_bins must be in [2, 100]")
 
         n = int(len(cate_arr))
         n_control = int((t == 0).sum())
@@ -118,9 +126,6 @@ def segment_users(
         # ------------------------------------------
         # 4) Compute Baseline Probability
         # ------------------------------------------
-        # Stable default for baseline visualization (not exposed as param to keep API minimal)
-        n_baseline_bins = 20
-
         # Assign each row to a CATE-quantile bin (0..n_bins-1)
         # Handle duplicates robustly via rank-based qcut
         cate_rank = pd.Series(cate_arr).rank(method="first")
@@ -227,7 +232,10 @@ def segment_users(
                 float(baseline_threshold) * 100.0,
             ))
         else:
-            baseline_pct = float(control_conversion_rate)
+            # Edge case: 当高 CATE 子群为空时（极端负向实验），强制所有用户为 Lost Causes/Sleeping Dogs
+            # 使用 inf 确保 baseline_high 全为 False，避免将 Sleeping Dogs 误分类为 Sure Things
+            baseline_pct = float('inf')
+            warnings.append("High-CATE subgroup empty; all users classified as low-CATE")
         baseline_high = baseline_prob >= baseline_pct
 
         segments = np.empty(n, dtype=object)
