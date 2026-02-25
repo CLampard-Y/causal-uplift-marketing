@@ -215,12 +215,11 @@ def segment_users(
         #   使用子群内百分位数能自适应该子群的条件分布，产生有意义的 Sure Things 分割。
         #
         # baseline_threshold 参数语义（默认 0.5）：
-        #   "在高 CATE 用户中，baseline_prob 排名前 (1 - baseline_threshold) 的用户
-        #    被识别为 Sure Things（即使不营销也有较高自然转化倾向的用户）"
-        #   0.5 → 高 CATE 子群内 baseline 排名前 50% = Sure Things
-        #   0.3 → 高 CATE 子群内 baseline 排名前 70% = Sure Things（更宽松）
-        #   0.7 → 高 CATE 子群内 baseline 排名前 30% = Sure Things（更严格）
-        
+        #   在高 CATE 用户中，定义 baseline_prob 排名前 (1 - baseline_threshold) 的用户为 Sure Things
+        #   0.5 → 高 CATE 子群内 baseline_prob 排名前 50% = Sure Things
+        #   0.3 → 高 CATE 子群内 baseline_prob 排名前 70% = Sure Things（更宽松）
+        #   0.7 → 高 CATE 子群内 baseline_prob 排名前 30% = Sure Things（更严格）
+
         high_cate_baseline = baseline_prob[cate_high & (cate_arr >= 0.0)]
         if len(high_cate_baseline) > 0:
             baseline_pct = float(np.percentile(
