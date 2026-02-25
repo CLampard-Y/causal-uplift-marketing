@@ -10,6 +10,9 @@ paths:
   cleaned_data: "data/processed/hillstrom_cleaned.csv"
   features_data: "data/processed/hillstrom_features.csv"
   figures_dir: "outputs/figures/"
+  matched_data: "data/processed/hillstrom_matched.csv"
+  cate_vectors: "data/processed/cate_vectors.npz"
+  qini_results: "data/processed/qini_results.json"
 
 # Core business columns and modeling covariates
 data:
