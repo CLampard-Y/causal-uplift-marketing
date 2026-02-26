@@ -3,7 +3,7 @@
 # ==========================================
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -210,7 +210,7 @@ def segment_users(
         
         """
 
-        # 基线高低阈值：在高 CATE 子群内部使用百分位数分割
+        # 基于本数据集基线高低阈值: 在高 CATE 子群内部使用百分位数分割
         # 为什么用百分位而非绝对倍数阈值：
         #   baseline_prob 是按 CATE 分位数分桶后计算的控制组转化率。
         #   高 CATE 分桶本身就意味着"处理效应大"，这恰恰说明该桶的控制组转化率低
@@ -283,3 +283,274 @@ def segment_users(
     except Exception as exc:
         raise RuntimeError(f"segment_users failed: {exc}") from exc
 
+
+def simulate_roi(
+    segments_df: pd.DataFrame,
+    Y: pd.Series,
+    T: pd.Series,
+    budget_pcts: Sequence[float] = (0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+    cost_per_contact: float = 1.0,
+    random_state: int = 42,
+) -> dict:
+    """
+    Simulate ROI under three targeting strategies:
+      1) Full targeting (contact everyone)
+      2) Random targeting (contact K% of users)
+      3) Precision targeting (contact only Persuadables)
+    Parameters
+    ----------
+    segments_df : pd.DataFrame (output of segment_users())
+        用户分群结果 (segment_users() 的输出)
+        shape: (~64K, 3+)
+        columns:
+        - cate: float — 原始 CATE 值
+        - baseline_prob: float — 控制组转化率 (同 CATE 分位数桶)
+        - segment: str — 分组标签 {"Persuadables", "Sure Things", "Lost Causes", "Sleeping Dogs"}
+        - optional _warning: str — 分组质量警告 (如果分组不合理)
+    Y : pd.Series
+        实际转化效果 (conversion, 0/1)
+    T : pd.Series
+        处理组 (实际营销宣传) 标记 (0/1)
+    budget_pcts : list[float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+        模拟不同预算比例 (即投放人数占总人数的比例) 下的投放效果
+    cost_per_contact : float = 1.0
+        每次触达的单位成本 (归一化为 1)
+    random_state : int = 42
+        投放策略的随机种子
+    Returns
+    -------
+    roi_results : dict
+        包含三种策略的 ROI 效果
+
+    NOTE 业务架构说明 (增量归因系统设计)
+    --------------------------------
+    - 增量转化是因果量，本函数使用 **CATE-sum 归因** 作为主核算系统：
+      * 全量投放增量 = sum(cate) 对所有用户求和
+      * 随机投放增量（期望值）= mean(cate) × 触达用户数
+      * 精准投放增量 = sum(cate) 对 Persuadables 求和 (只对 Persuadables 投放)
+    - 我们仍然从 (Y, T) 计算观测到的 RCT ATE 作为诊断指标，但不强制 sum(cate) == ATE × N：
+      * sum(cate): 个体因果增量的聚合
+                   反映的是 "如果真的给这 N 个用户投放, 模型预测会新增多少变化" (围观因果推断的直接输出)
+      * ATE × N: 总体平均效应, 假设所有用户的 uplift 都等于平均值
+                 忽略了异质性 (有些用户的 CATE 是 0.8, 有些是 -0.2)
+      * 实际业务中，模型给出的 CATE 向量是估计值，由于校准误差，可能不会精确聚合到观测 ATE
+      * 这种不一致性是可接受的，因为我们关注的是个体层面的因果增量排序，而非总体平均效应
+    - budget_sweep 使用 CATE 排序模拟"预算越多，优先触达 uplift 越高的用户"，与上述归因系统保持内部一致性
+    """
+    try:
+        # -------------------------------------------
+        # 0) Input Validation & Type Conversion
+        # -------------------------------------------
+        if not isinstance(segments_df, pd.DataFrame) or segments_df.empty:
+            raise ValueError("segments_df must be a non-empty pandas.DataFrame")
+        if "cate" not in segments_df.columns or "segment" not in segments_df.columns:
+            raise ValueError("segments_df must contain 'cate' and 'segment' columns")
+
+        if not (isinstance(cost_per_contact, (int, float)) and float(cost_per_contact) > 0.0):
+            raise ValueError("cost_per_contact must be > 0")
+
+        if budget_pcts is None or len(budget_pcts) == 0:
+            raise ValueError("budget_pcts must be a non-empty sequence")
+
+        budget_list = [float(x) for x in budget_pcts]
+        if any((not np.isfinite(p)) for p in budget_list):
+            raise ValueError("budget_pcts contains NaN/inf")
+        if any((p <= 0.0 or p > 1.0) for p in budget_list):
+            raise ValueError("budget_pcts values must be in (0, 1]")
+
+        # Assumes the sweep reaches 100% so we can validate the endpoint.
+        if 1.0 not in budget_list:
+            raise ValueError("budget_pcts must include 1.0 to validate full-budget endpoint")
+
+        cate_arr = pd.to_numeric(segments_df["cate"], errors="coerce").to_numpy(dtype=float, copy=False).reshape(-1)
+        if np.isnan(cate_arr).any():
+            raise ValueError("segments_df['cate'] contains NaN/non-numeric values")
+        if not np.isfinite(cate_arr).all():
+            raise ValueError("segments_df['cate'] contains inf/-inf values")
+
+        seg_series = segments_df["segment"].astype(str)
+        if seg_series.isnull().any():
+            raise ValueError("segments_df['segment'] contains NaN values")
+        if not set(pd.unique(seg_series)).issubset(_SEGMENTS):
+            raise ValueError("segments_df contains unknown segment label(s)")
+
+        t_series = T if isinstance(T, pd.Series) else pd.Series(T)
+        y_series = Y if isinstance(Y, pd.Series) else pd.Series(Y)
+
+        if pd.api.types.is_bool_dtype(t_series):
+            t_series = t_series.astype(int)
+        if pd.api.types.is_bool_dtype(y_series):
+            y_series = y_series.astype(int)
+
+        t = pd.to_numeric(t_series, errors="coerce")
+        y = pd.to_numeric(y_series, errors="coerce")
+        if t.isnull().any():
+            raise ValueError("T contains NaN/non-numeric values")
+        if y.isnull().any():
+            raise ValueError("Y contains NaN/non-numeric values")
+
+        t = t.astype(int)
+        y = y.astype(int)
+
+        if len(segments_df) != len(t) or len(segments_df) != len(y):
+            raise ValueError("Length mismatch among segments_df, Y, T")
+        if not set(pd.unique(t)).issubset({0, 1}):
+            raise ValueError("T must be binary (0/1)")
+        if not set(pd.unique(y)).issubset({0, 1}):
+            raise ValueError("Y must be binary (0/1)")
+
+        n = int(len(segments_df))
+        n_treated = int((t == 1).sum())
+        n_control = int(n - n_treated)
+        if n_treated <= 0 or n_control <= 0:
+            raise ValueError("Both treated and control groups must be non-empty")
+
+        # -------------------------------------------
+        # 1) Strategy 1: Full Targeting (contact everyone)
+        # -------------------------------------------
+        # treated/control conversion rate
+        treated_rate = float(y[t == 1].mean())
+        control_rate = float(y[t == 0].mean())
+
+        # Observed ATE compute from trated/control rate
+        ate_observed = treated_rate - control_rate
+
+        # 业务核算逻辑：增量转化 = sum(CATE)，而非 ATE × N
+        #   - sum(CATE): 个体 uplift 的聚合，反映真实的因果增量
+        #   - ATE × N: 总体平均效应，可能因模型校准误差与 sum(CATE) 不完全一致
+        #   - 使用 CATE-sum 确保与 budget_sweep（也基于 CATE 排序）的内部一致性
+        full_incremental = float(cate_arr.sum())
+
+        # ATE compute from CATE
+        ate_from_cate = float(full_incremental / float(n))
+        full_cost = float(n * float(cost_per_contact))
+        full_roi = float(full_incremental / full_cost) if full_cost > 0 else 0.0
+
+        # -------------------------------------------
+        # 2) Strategy 2: Random Targeting (budget sweep)
+        # -------------------------------------------
+        # 业务模拟逻辑：随机投放使用期望值（确定性），而非随机抽样
+        #   - 随机投放增量 = mean(CATE) × 触达用户数（期望值）
+        #   - 不使用随机抽样是因为我们关注的是策略的期望 ROI，而非单次实验的随机波动
+        #   - 如果用随机抽样, 每次模拟的结果会因为抽样方差而波动, 反而掩盖不同策略本身的系统性差异
+        #   - 这与精准投放/预算扫描使用相同的增量归因系统（CATE-sum）
+
+        # Keep signature stable
+        # Prepare for future stochastic simulations
+        _ = int(random_state)  
+
+        random_results: list[dict] = []
+        for pct in budget_list:
+            n_target = int(round(n * pct))
+            n_target = max(1, min(n, n_target))
+
+            # Compute expected incremental conversion
+            inc = float(ate_from_cate * n_target)
+            cost = float(n_target * float(cost_per_contact))
+            roi = float(inc / cost) if cost > 0 else 0.0
+            random_results.append(
+                {
+                    "budget_pct": float(pct),
+                    "n_targeted": int(n_target),
+                    "n_incremental_conv": float(inc),
+                    "roi": float(roi),
+                }
+            )
+
+        # -------------------------------------------
+        # 3) Strategy 3: Precision Targeting (Persuadables only)
+        # -------------------------------------------
+        persuadables_mask = seg_series.to_numpy(dtype=str, copy=False) == "Persuadables"
+        n_persuadables = int(persuadables_mask.sum())
+
+        precision_incremental = float(cate_arr[persuadables_mask].sum()) if n_persuadables > 0 else 0.0
+        precision_cost = float(n_persuadables * float(cost_per_contact))
+        precision_roi = float(precision_incremental / precision_cost) if precision_cost > 0 else 0.0
+
+        # 业务 KPI 计算：
+        #   - 预算节省率 = (1 - Persuadables 占比) × 100%
+        #     衡量精准投放相比全量投放节省了多少营销预算
+        #   - 增量转化保留率 = (精准投放增量 / 全量投放增量) × 100%
+        #     衡量精准投放在节省预算的同时，保留了多少增量转化效果
+        budget_saving_pct = float((1.0 - (n_persuadables / n)) * 100.0)
+        if full_incremental > 0:
+            conversion_retention_pct = float((precision_incremental / full_incremental) * 100.0)
+        else:
+            conversion_retention_pct = 0.0
+
+        precision_payload: dict = {
+            "n_targeted": int(n_persuadables),
+            "n_incremental_conv": float(precision_incremental),
+            "total_cost": float(precision_cost),
+            "roi": float(precision_roi),
+            "budget_saving_pct": float(budget_saving_pct),
+            "conversion_retention_pct": float(conversion_retention_pct),
+        }
+        if precision_incremental < 0.0:
+            precision_payload["_warning"] = "Precision targeting has negative incremental conversions (sum(CATE) < 0)"
+
+        # -------------------------------------------
+        # 4) Budget Ccan: by CATE Ranking (high -> low)
+        # -------------------------------------------
+        # 业务逻辑：按 CATE 降序排列，模拟"预算越多，优先触达 CATE 越高的用户"
+        #   - 这是最优投放策略的理论上界（Oracle）
+        #   - 实际业务中，需要用 Uplift Model 预测 CATE 来近似这个排序
+        order = np.argsort(-cate_arr, kind="mergesort")  # stable for ties
+
+        budget_sweep: list[dict] = []
+        for pct in budget_list:
+            n_target = int(round(n * pct))
+            n_target = max(1, min(n, n_target))
+
+            # EXtract top n_target users after CATE sort (Descending)
+            top_sum = float(cate_arr[order[:n_target]].sum())
+            budget_sweep.append(
+                {
+                    "budget_pct": float(pct),
+                    "n_targeted": int(n_target),
+                    "cumulative_uplift": float(top_sum),
+                }
+            )
+
+        roi_results = {
+            "full_targeting": {
+                "n_targeted": int(n),
+                "n_incremental_conv": float(full_incremental),
+                "total_cost": float(full_cost),
+                "roi": float(full_roi),
+            },
+            "random_targeting": random_results,
+            "precision_targeting": precision_payload,
+            "budget_sweep": budget_sweep,
+        }
+
+        # ============================================
+        # 5) Final Validation assertions
+        # ============================================
+        assert roi_results["precision_targeting"]["budget_saving_pct"] > 0.0, "Precision targeting failed to save budget (budget_saving_pct <= 0)"
+        assert roi_results["precision_targeting"]["roi"] >= roi_results["full_targeting"]["roi"], (
+            "Precision targeting ROI is lower than full targeting - check segmentation logic"
+        )
+
+        # Sweep endpoint should match full targeting (allow small numeric discrepancy).
+        sweep_end = next((x for x in budget_sweep if abs(float(x["budget_pct"]) - 1.0) <= 1e-12), None)
+        if sweep_end is None:
+            raise AssertionError("Budget sweep missing 100% endpoint (budget_pct=1.0)")
+        assert abs(float(sweep_end["cumulative_uplift"]) - full_incremental) < 1.0, "Budget sweep endpoint does not match full targeting incremental"
+
+        cr = float(roi_results["precision_targeting"]["conversion_retention_pct"])
+        assert 0.0 <= cr <= 150.0, "Conversion retention percentage out of bounds: {cr}% (expected [0, 150])"
+
+        # Add lightweight diagnostics without affecting downstream usage.
+        # (Optional fields; safe for JSON persistence.)
+        roi_results["_meta"] = {
+            "ate_observed": float(ate_observed),
+            "ate_from_cate": float(ate_from_cate),
+            "full_incremental_observed": float(ate_observed * n),
+            "full_incremental_from_cate": float(full_incremental),
+        }
+
+        return roi_results
+
+    except Exception as exc:
+        raise RuntimeError(f"simulate_roi failed: {exc}") from exc
