@@ -8,14 +8,39 @@ from typing import Tuple, Optional
 import numpy as np
 import pandas as pd
 
+# Columns that must never be used as covariates for uplift/CATE estimation.
+# This guards against the most common real-world failure mode: label/post-treatment leakage.
+_FORBIDDEN_FEATURE_COLS = {"treatment", "conversion", "spend", "visit"}
+
+
+def _validate_feature_frame(X: pd.DataFrame, *, name: str) -> pd.DataFrame:
+    if X is None:
+        raise ValueError(f"{name} cannot be None")
+    if not isinstance(X, pd.DataFrame):
+        raise TypeError(f"{name} must be a pandas.DataFrame")
+    if X.empty:
+        raise ValueError(f"{name} cannot be empty")
+    if X.isnull().any().any():
+        raise ValueError(f"{name} contains NaN values")
+    if not all(pd.api.types.is_numeric_dtype(X[c]) for c in X.columns):
+        raise ValueError(f"{name} must contain only numeric columns")
+    if not np.isfinite(X.to_numpy(dtype=float, copy=False)).all():
+        raise ValueError(f"{name} contains inf/-inf values")
+
+    found_forbidden = [c for c in _FORBIDDEN_FEATURE_COLS if c in X.columns]
+    if found_forbidden:
+        raise ValueError(
+            f"{name} contains forbidden columns: {sorted(found_forbidden)}. "
+            "Do not include treatment/outcomes/post-treatment mediators in features."
+        )
+    return X
+
+
 # Helper: validate X, T, Y inputs
 def _validate_xy_t_inputs(X: pd.DataFrame, T: pd.Series, Y: pd.Series) -> Tuple[pd.DataFrame, pd.Series, pd.Series]:
-    if X is None or T is None or Y is None:
-        raise ValueError("X, T, Y cannot be None")
-    if not isinstance(X, pd.DataFrame):
-        raise TypeError("X must be a pandas.DataFrame")
-    if X.empty:
-        raise ValueError("X cannot be empty")
+    if T is None or Y is None:
+        raise ValueError("T, Y cannot be None")
+    X = _validate_feature_frame(X, name="X")
 
     t_series = T if isinstance(T, pd.Series) else pd.Series(T)
     y_series = Y if isinstance(Y, pd.Series) else pd.Series(Y)
@@ -39,12 +64,7 @@ def _validate_xy_t_inputs(X: pd.DataFrame, T: pd.Series, Y: pd.Series) -> Tuple[
     if len(X) != len(t) or len(X) != len(y):
         raise ValueError(f"Length mismatch: len(X)={len(X)}, len(T)={len(t)}, len(Y)={len(y)}")
 
-    if X.isnull().any().any():
-        raise ValueError("X contains NaN values")
-    if not all(pd.api.types.is_numeric_dtype(X[c]) for c in X.columns):
-        raise ValueError("X must contain only numeric columns")
-    if not np.isfinite(X.to_numpy(dtype=float, copy=False)).all():
-        raise ValueError("X contains inf/-inf values")
+    # NOTE: X validation is handled by _validate_feature_frame()
 
     if not set(pd.unique(t)).issubset({0, 1}):
         raise ValueError("T must be binary (0/1)")
@@ -243,6 +263,10 @@ def fit_s_learner(
     """
     try:
         X, t, y = _validate_xy_t_inputs(X, T, Y)
+        if X_pred is not None:
+            X_pred = _validate_feature_frame(X_pred, name="X_pred")
+            if list(X_pred.columns) != list(X.columns):
+                raise ValueError("X_pred columns must match X columns (same names and order)")
 
         # S-Learner augmentation: append T as an additional feature column
         t_col = "__treatment_feature__"
@@ -352,6 +376,10 @@ def fit_t_learner(
     """
     try:
         X, t, y = _validate_xy_t_inputs(X, T, Y)
+        if X_pred is not None:
+            X_pred = _validate_feature_frame(X_pred, name="X_pred")
+            if list(X_pred.columns) != list(X.columns):
+                raise ValueError("X_pred columns must match X columns (same names and order)")
 
         t_arr = t.to_numpy(dtype=int, copy=False)
 
@@ -468,6 +496,10 @@ def fit_x_learner(
     """
     try:
         X, t, y = _validate_xy_t_inputs(X, T, Y)
+        if X_pred is not None:
+            X_pred = _validate_feature_frame(X_pred, name="X_pred")
+            if list(X_pred.columns) != list(X.columns):
+                raise ValueError("X_pred columns must match X columns (same names and order)")
 
         ps_train = np.asarray(ps, dtype=float).reshape(-1)
         if len(ps_train) != len(X):

@@ -1,6 +1,14 @@
 # Required .gitignore rules
 
 # Raw data artifacts (large files, excluded from version control)
+# NOTE: some environments use a global gitignore that ignores `data/` entirely.
+# The following negations ensure the repo can still track folder scaffolding docs.
+!data/
+!data/README.md
+!data/raw/
+!data/processed/
+!data/features/
+
 data/raw/*
 !data/raw/.gitkeep
 

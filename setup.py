@@ -19,7 +19,7 @@ setup(
     description="Causal inference and uplift modeling for marketing campaigns (Hillstrom dataset)",
     author="CLampard",
     packages=find_packages(),
-    python_requires=">=3.9",
+    python_requires=">=3.10",
     install_requires=[
         # Core data processing
         "pandas>=2.0.0",
@@ -52,7 +52,6 @@ setup(
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Science/Research",
         "Topic :: Scientific/Engineering :: Artificial Intelligence",
-        "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
     ],

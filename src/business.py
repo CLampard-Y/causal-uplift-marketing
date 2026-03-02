@@ -99,8 +99,9 @@ def segment_users(
             raise ValueError("method must be 'quantile' or 'threshold'")
         if not (0.0 < float(cate_threshold_pct) <= 100.0):
             raise ValueError("cate_threshold_pct must be in (0, 100]")
-        if not (float(baseline_threshold) > 0.0):
-            raise ValueError("baseline_threshold must be > 0")
+        bt = float(baseline_threshold)
+        if (not np.isfinite(bt)) or (not (0.0 < bt <= 1.0)):
+            raise ValueError("baseline_threshold must be in (0, 1]")
         if not (2 <= int(n_baseline_bins) <= 100):
             raise ValueError("n_baseline_bins must be in [2, 100]")
 
@@ -155,7 +156,8 @@ def segment_users(
         #      - Computational Efficiency: avoid use model.predict_proba() to reduce computational cost.
         baseline_prob = np.array([ctrl_rates.get(int(b), control_conversion_rate) for b in tmp["bin"]], dtype=float)
         baseline_prob = np.clip(baseline_prob, 0.0, 1.0)
-        assert np.isfinite(baseline_prob).all(), "baseline_prob contains NaN/inf"
+        if not np.isfinite(baseline_prob).all():
+            raise ValueError("baseline_prob contains NaN/inf")
 
         # -----------------------------------------
         # 5) Quadrant Assignment.
@@ -225,11 +227,13 @@ def segment_users(
         #   0.3 → 高 CATE 子群内 baseline_prob 排名前 70% = Sure Things（更宽松）
         #   0.7 → 高 CATE 子群内 baseline_prob 排名前 30% = Sure Things（更严格）
 
+        warnings: list[str] = []
+
         high_cate_baseline = baseline_prob[cate_high & (cate_arr >= 0.0)]
         if len(high_cate_baseline) > 0:
             baseline_pct = float(np.percentile(
                 high_cate_baseline,
-                float(baseline_threshold) * 100.0,
+                bt * 100.0,
             ))
         else:
             # Edge case: 当高 CATE 子群为空时（极端负向实验），强制所有用户为 Lost Causes/Sleeping Dogs
@@ -258,7 +262,6 @@ def segment_users(
         # -----------------------------------------
         # DQ: empty quadrant defense.
         counts = segments_df["segment"].value_counts()
-        warnings: list[str] = []
         for seg in ["Persuadables", "Sure Things", "Lost Causes", "Sleeping Dogs"]:
             if int(counts.get(seg, 0)) < 100:
                 warnings.append(f"{seg} < 100")
@@ -269,17 +272,25 @@ def segment_users(
         sleeping_dog_pct = float(counts.get("Sleeping Dogs", 0)) / float(n)
 
         # Validation assertions (PRD)
-        assert len(segments_df) == len(cate_arr), "Segment count mismatch"
-        assert set(segments_df["segment"].dropna().unique()).issubset(_SEGMENTS), "Unknown segment"
-        assert segments_df["segment"].notna().all(), "Missing segment assignment"
-        assert int(counts.sum()) == len(cate_arr), "After segmentation, sample count mismatch"
-        assert sleeping_dog_pct < 0.50, f"Sleeping Dogs ratio {sleeping_dog_pct:.1%} too high"
+        if len(segments_df) != len(cate_arr):
+            raise ValueError("Segment count mismatch")
+        if not set(segments_df["segment"].dropna().unique()).issubset(_SEGMENTS):
+            raise ValueError("Unknown segment")
+        if not segments_df["segment"].notna().all():
+            raise ValueError("Missing segment assignment")
+        if int(counts.sum()) != len(cate_arr):
+            raise ValueError("After segmentation, sample count mismatch")
+        if sleeping_dog_pct >= 0.50:
+            raise ValueError(f"Sleeping Dogs ratio {sleeping_dog_pct:.1%} too high")
         persuadable_cates = segments_df.loc[segments_df["segment"] == "Persuadables", "cate"]
         if len(persuadable_cates) > 0:
-            assert float(persuadable_cates.min()) >= 0.0, "Persuadables contains negative CATE"
+            if float(persuadable_cates.min()) < 0.0:
+                raise ValueError("Persuadables contains negative CATE")
 
         return segments_df
 
+    except ValueError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"segment_users failed: {exc}") from exc
 
@@ -527,19 +538,21 @@ def simulate_roi(
         # ============================================
         # 5) Final Validation assertions
         # ============================================
-        assert roi_results["precision_targeting"]["budget_saving_pct"] > 0.0, "Precision targeting failed to save budget (budget_saving_pct <= 0)"
-        assert roi_results["precision_targeting"]["roi"] >= roi_results["full_targeting"]["roi"], (
-            "Precision targeting ROI is lower than full targeting - check segmentation logic"
-        )
+        if float(roi_results["precision_targeting"]["budget_saving_pct"]) <= 0.0:
+            raise ValueError("Precision targeting failed to save budget (budget_saving_pct <= 0)")
+        if float(roi_results["precision_targeting"]["roi"]) < float(roi_results["full_targeting"]["roi"]):
+            raise ValueError("Precision targeting ROI is lower than full targeting - check segmentation logic")
 
         # Sweep endpoint should match full targeting (allow small numeric discrepancy).
         sweep_end = next((x for x in budget_sweep if abs(float(x["budget_pct"]) - 1.0) <= 1e-12), None)
         if sweep_end is None:
-            raise AssertionError("Budget sweep missing 100% endpoint (budget_pct=1.0)")
-        assert abs(float(sweep_end["cumulative_uplift"]) - full_incremental) < 1.0, "Budget sweep endpoint does not match full targeting incremental"
+            raise ValueError("Budget sweep missing 100% endpoint (budget_pct=1.0)")
+        if abs(float(sweep_end["cumulative_uplift"]) - full_incremental) >= 1.0:
+            raise ValueError("Budget sweep endpoint does not match full targeting incremental")
 
         cr = float(roi_results["precision_targeting"]["conversion_retention_pct"])
-        assert 0.0 <= cr <= 150.0, "Conversion retention percentage out of bounds: {cr}% (expected [0, 150])"
+        if not (0.0 <= cr <= 150.0):
+            raise ValueError(f"Conversion retention percentage out of bounds: {cr}% (expected [0, 150])")
 
         # Add lightweight diagnostics without affecting downstream usage.
         # (Optional fields; safe for JSON persistence.)
@@ -552,5 +565,7 @@ def simulate_roi(
 
         return roi_results
 
+    except ValueError:
+        raise
     except Exception as exc:
         raise RuntimeError(f"simulate_roi failed: {exc}") from exc

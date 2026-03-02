@@ -160,8 +160,9 @@ def load_and_clean(
         assert 60000 <= len(df) <= 70000, "rows count error, check data source"
         assert 0.60 <= float(df["treatment"].mean()) <= 0.70, "Treatment ratio error"
 
-        # Temporal contamination check: verify visit is a true post-treatment variable
-        # If control group visit rate >= treatment group, it suggests pre-treatment visits exist
+        # Temporal contamination check: verify `visit` behaves like a post-treatment mediator.
+        # In Hillstrom-style email RCT, treatment exposure should increase site visits.
+        # If treatment does NOT lift visits, `visit` may contain pre-treatment activity or be noisy.
         if "visit" in df.columns:
             # Convert visit to numeric (handle string '0'/'1' from raw data)
             # Use .astype(str) first to ensure consistent string type, then convert to int
@@ -183,14 +184,16 @@ def load_and_clean(
             # Use threshold-based check to avoid false positives from floating-point precision
             # or legitimate edge cases where the difference is negligible
             MIN_VISIT_LIFT = 0.01  # 1% minimum expected lift
-            visit_lift = control_visit_rate - treatment_visit_rate
+            visit_lift = float(treatment_visit_rate - control_visit_rate)
 
-            assert visit_lift >= MIN_VISIT_LIFT, (
-                f"Temporal contamination suspected: treatment visit rate ({treatment_visit_rate:.2%}) "
-                f"is not sufficiently higher than control ({control_visit_rate:.2%}). "
-                f"Expected lift >= {MIN_VISIT_LIFT:.2%}, observed: {visit_lift:.2%}. "
-                "This suggests pre-treatment visits may exist, violating the post-treatment assumption."
-            )
+            if visit_lift < MIN_VISIT_LIFT:
+                raise ValueError(
+                    "Temporal contamination suspected: treatment visit rate "
+                    f"({treatment_visit_rate:.2%}) is not sufficiently higher than control "
+                    f"({control_visit_rate:.2%}). Expected lift >= {MIN_VISIT_LIFT:.2%}, "
+                    f"observed: {visit_lift:.2%}. This suggests `visit` may include pre-treatment "
+                    "activity or violate the post-treatment assumption."
+                )
 
         output_file = Path(output_path)
         output_file.parent.mkdir(parents=True, exist_ok=True)

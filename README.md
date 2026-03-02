@@ -2,7 +2,7 @@
 
 > **因果推断与 Uplift Modeling 营销分析项目**
 
-[![Python](https://img.shields.io/badge/Python-3.8%2B-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 
 ---
 
@@ -73,12 +73,13 @@ Project3_Causal-Uplift-Marketing/
 │   ├── raw/                    # 原始数据 + 时间戳快照（不可变）
 │   └── processed/              # 清洗后数据（ELT 输出）
 ├── docs/                       # 项目规划文档（PRD）
-├── notebooks/                  # 分析 Notebook（01-05）
+├── notebooks/                  # 分析 Notebooks（01-05 + DoD gate）
 │   ├── 01_data_ingestion_and_eda.ipynb
 │   ├── 02_bias_exposure_and_naive_ate.ipynb
-│   ├── 03_psm_and_ate.ipynb
+│   ├── 03_propensity_score_matching.ipynb
 │   ├── 04_uplift_modeling.ipynb
-│   └── 05_segmentation_and_roi.ipynb
+│   ├── 05_segmentation_and_roi.ipynb
+│   └── Phase1_DoD.ipynb
 ├── outputs/
 │   └── figures/                # 生成的可视化图表（27 张）
 ├── src/
@@ -86,8 +87,7 @@ Project3_Causal-Uplift-Marketing/
 │   ├── causal.py               # 因果推断工具（695 行）
 │   ├── uplift.py               # Uplift Modeling（763 行）
 │   └── business.py             # 业务逻辑层（557 行）
-├── tests/
-│   └── test_causal.py          # TDD 测试套件（373 行）
+├── (no tests/)                 # 当前以 DoD Notebook 作为回归门禁
 ├── requirements.txt            # 依赖管理
 ├── setup.py                    # 包安装配置
 └── README.md                   # 项目文档
@@ -100,12 +100,14 @@ Project3_Causal-Uplift-Marketing/
 本项目在以下环境下开发完成：
 
 **Core Dependencies**:
-- Python 3.8+
+- Python 3.10+
 - `pandas`, `numpy`: 数据处理
 - `scikit-learn`: 机器学习（LogisticRegression, PSM）
 - `xgboost`: Uplift Modeling（Meta-Learners）
 - `matplotlib`, `seaborn`: 可视化
-- `pytest`: 单元测试
+
+**Quality Gate**:
+- 当前仓库未提交 `tests/`，主要以 `notebooks/Phase1_DoD.ipynb` 作为回归门禁（可执行验收清单）
 
 **Note**: 所有 Notebooks 已包含完整输出结果（图表、统计量、代码执行结果），可直接在 GitHub 上浏览，无需本地运行。如需复现分析流程，请参考 `requirements.txt` 和 `setup.py`
 
@@ -497,15 +499,14 @@ Sleeping Dogs (13.4%)
 
 **工程价值**: 硬编码是大厂工程流水线的大忌。统一配置管理能实现业务逻辑与参数的解耦，方便后续在 Airflow 等调度系统中进行自动化传参和 A/B 实验。
 
-#### 测试驱动开发（Test-Driven Development）
+#### 测试与可复现性（Tests & Reproducibility）
 
-**质量保证**:
-- **Test Coverage**: `tests/test_causal.py` (373 行) 包含 6 大测试类
-- **RCT Validation**: 验证 PS 均值 ~0.667（等于 Treatment 比例）
-- **Edge Cases**: 测试全 1、全 0、完美分离等边界情况
-- **Immutability**: 验证不修改输入数据
+**现状说明**:
+- 当前版本未提交自动化单测（`tests/` 不在仓库中）
+- 以 `notebooks/Phase1_DoD.ipynb` 作为最小可执行验收门禁（Artifacts 完整性 + DQ 断言）
 
-**工程价值**: 通过 TDD 确保 PS 估计的正确性，特别是在 RCT 数据中 PS 均值应接近 Treatment 比例（~0.667），这是因果推断方法论正确性的关键验证。
+**后续增强方向**:
+- 增加不依赖原始数据的合成数据单测：PSM pairing 完整性、bootstrap CI 稳定性、Qini 基本不变量、分群边界条件
 
 #### Git 规范（Conventional Commits）
 
