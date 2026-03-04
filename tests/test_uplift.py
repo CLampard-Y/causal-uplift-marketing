@@ -825,6 +825,192 @@ class TestInputValidation:
                 random_state=42,
             )
 
+class TestImmutability:
+    """
+    Validation Goal: 测 "函数纯度/引用透明度"
+        "fit_*_learner()" 作为建模函数, 必须把输入当作只读, 不允许修改 X/T/Y/ps
+
+    Workflow:
+        1) 该类下有 3 个 test 函数, 分别对应测试 3 个 learner:
+            - test_s_learner_does_not_mutate_input
+            - test_t_learner_does_not_mutate_input
+            - test_x_learner_does_not_mutate_input
+        2) 每个 test 都是同样的验证结构
+            - 用 _make_synthetic_uplift_data 创建一个合成数据集 (含 X/T/Y/ps)
+            - deep copy 备份: X_before/T_before/Y_before/(ps_before)
+            - 用 monkeypatch 把内部训练函数替换成 dummy
+            - 调用对应的 uplift.fit_*_learner(...)
+            - 用 pd.testing.assert_*_equal / np.testing.assert_array_equal 断言输入是否未被修改
+
+    Attention:
+        1) 该测试目的不是测模型效果, 而是测 "工程契约": 输入不可变
+        2) monkeypatch 是为了把 ML 不确定性剥离:
+            - 真实 ML 会引入随机性
+            - 真实训练会慢, 具有 flaky 风险, 还会让单纯的 "输入不变" 测试变成 integration 测试
+            - 测试目的是 "有没有副作用 (更改输入)", 不是评判模型好坏
+    """
+    def test_s_learner_does_not_mutate_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        X_before = X.copy(deep=True)
+        T_before = T.copy(deep=True)
+        Y_before = Y.copy(deep=True)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, 0.123, dtype=float)      # p always 0.123 (CONST)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        _ = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+
+        # Only train one model, check that it was called once.
+        assert clf_calls["n"] == 1
+
+        pd.testing.assert_frame_equal(X, X_before, check_dtype=True)
+        pd.testing.assert_series_equal(T, T_before, check_dtype=True)
+        pd.testing.assert_series_equal(Y, Y_before, check_dtype=True)
+        assert "__treatment_feature__" not in X.columns
+
+    def test_t_learner_does_not_mutate_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        X_before = X.copy(deep=True)
+        T_before = T.copy(deep=True)
+        Y_before = Y.copy(deep=True)
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            # model_1 then model_0
+            if clf_calls["n"] == 1:
+                return _DummyClassifier(0.21)
+            if clf_calls["n"] == 2:
+                return _DummyClassifier(0.19)
+            raise AssertionError("Unexpected number of classifier fits")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        _ = uplift.fit_t_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+
+        # Train two models, check that it was called twice.
+        assert clf_calls["n"] == 2
+
+        pd.testing.assert_frame_equal(X, X_before, check_dtype=True)
+        pd.testing.assert_series_equal(T, T_before, check_dtype=True)
+        pd.testing.assert_series_equal(Y, Y_before, check_dtype=True)
+
+    def test_x_learner_does_not_mutate_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, ps = _make_synthetic_uplift_data(n=300, random_state=42)
+        ps = ps.copy()
+
+        # If X-learner ever clips PS in-place, this will catch it.
+        ps[0] = 0.0
+        ps[1] = 1.0
+
+        X_before = X.copy(deep=True)
+        T_before = T.copy(deep=True)
+        Y_before = Y.copy(deep=True)
+        ps_before = ps.copy()
+
+        # Stage 1: dummy classifier
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            # outcome model_1 then model_0
+            if clf_calls["n"] == 1:
+                return _DummyClassifier(0.22)
+            if clf_calls["n"] == 2:
+                return _DummyClassifier(0.18)
+            raise AssertionError("Unexpected number of classifier fits")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        # Stage 2: dummy regressor
+        class _DummyRegressor:
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.zeros(int(len(X_in)), dtype=float)
+
+        reg_calls = {"n": 0}
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            reg_calls["n"] += 1
+            if reg_calls["n"] > 2:
+                raise AssertionError("Unexpected number of regressor fits")
+            return _DummyRegressor()
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        _ = uplift.fit_x_learner(X, T, Y, ps, n_estimators=10, max_depth=2, random_state=42)
+
+        assert clf_calls["n"] == 2
+        assert reg_calls["n"] == 2
+
+        pd.testing.assert_frame_equal(X, X_before, check_dtype=True)
+        pd.testing.assert_series_equal(T, T_before, check_dtype=True)
+        pd.testing.assert_series_equal(Y, Y_before, check_dtype=True)
+        np.testing.assert_array_equal(ps, ps_before)
 
 
 
