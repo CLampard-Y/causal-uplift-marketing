@@ -100,6 +100,174 @@ def _make_synthetic_uplift_data(*, n: int = 1000, random_state: int = 42):
     ps = rng.uniform(0.01, 0.99, size=n)
     return X, T, Y, ps
 
+class TestSLearnerBasicFunctionality:
+    def test_returns_numpy_array(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                # Use the injected treatment feature to produce non-zero CATE
+                # 防止 T 没有正确传入
+                t_col = "__treatment_feature__"
+                if t_col not in X_in.columns:
+                    raise AssertionError("Missing treatment feature column")
+
+                t = X_in[t_col].to_numpy(dtype=int, copy=False)
+                p = np.where(t == 1, 0.20, 0.10).astype(float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        assert isinstance(cate, np.ndarray)
+
+    def test_output_shape_matches_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                t = X_in["__treatment_feature__"].to_numpy(dtype=int, copy=False)
+                p = np.where(t == 1, 0.20, 0.10).astype(float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate_in = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        assert cate_in.shape == (len(X),)
+
+        X_pred = X.copy(deep=True)
+        cate_oos = uplift.fit_s_learner(
+            X,
+            T,
+            Y,
+            X_pred,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+        assert cate_oos.shape == (len(X_pred),)
+
+    def test_cate_no_nan(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                t = X_in["__treatment_feature__"].to_numpy(dtype=int, copy=False)
+                p = np.where(t == 1, 0.20, 0.10).astype(float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        assert np.isfinite(cate).all()
+
+    def test_cate_range_reasonable(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                t = X_in["__treatment_feature__"].to_numpy(dtype=int, copy=False)
+                # Keep uplift effect in a small, realistic range
+                p = np.where(t == 1, 0.20, 0.10).astype(float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        assert float(np.max(np.abs(cate))) < 0.50
+
+    def test_scale_pos_weight_applied(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=300, random_state=42)
+
+        class _DummyClassifier:
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                t = X_in["__treatment_feature__"].to_numpy(dtype=int, copy=False)
+                p = np.where(t == 1, 0.20, 0.10).astype(float)
+                return np.column_stack([1.0 - p, p])
+
+        captured = {"n": 0, "spw": None}
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            captured["n"] += 1
+            captured["spw"] = float(scale_pos_weight)
+
+            # S-learner must augment X with treatment as a feature.
+            assert "__treatment_feature__" in X_in.columns
+            return _DummyClassifier()
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        _ = uplift.fit_s_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+
+        assert captured["n"] == 1
+
+        n_pos = int((Y == 1).sum())
+        n_neg = int((Y == 0).sum())
+        expected_spw = float(n_neg / n_pos)
+        assert captured["spw"] == pytest.approx(expected_spw, abs=1e-12)
+
 class TestXLearnerPSWeighting:
     def test_ps_weighting_formula_correctness(self, monkeypatch: pytest.MonkeyPatch):
         """Validate final PS-weighted combination step.
