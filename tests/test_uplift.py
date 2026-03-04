@@ -218,13 +218,13 @@ class TestXLearnerPSWeighting:
 
         """
         Workflow:
-          1. 训练第一阶段 outcome model, 得到可控 (利用 monkeyptach 控制) 的 `mu_1` / `mu_0`
-          2. 生成伪残差 D_1/D_0 (这步仍会执行, 但是具体数值我们并不关心)
-          3. 训练第二阶段 outcome model: tau_1_model/tau_0_model
-              - 被 fake 函数取代, 所以
-              - tau_1_model.predict(X_out) == tau_1
-              - tau_0_model.predict(X_out) == tau_0
-          4. 最后计算 CATE (该 test 函数的目的)
+            1. 训练第一阶段 outcome model, 得到可控 (利用 monkeyptach 控制) 的 `mu_1` / `mu_0`
+            2. 生成伪残差 D_1/D_0 (这步仍会执行, 但是具体数值我们并不关心)
+            3. 训练第二阶段 outcome model: tau_1_model/tau_0_model
+                - 被 fake 函数取代, 所以
+                - tau_1_model.predict(X_out) == tau_1
+                - tau_0_model.predict(X_out) == tau_0
+            4. 最后计算 CATE (该 test 函数的目的)
         """
         cate = uplift.fit_x_learner(
             X,
@@ -240,5 +240,269 @@ class TestXLearnerPSWeighting:
         expected = (1.0 - ps) * tau_1 + ps * tau_0
         np.testing.assert_allclose(cate, expected, rtol=0.0, atol=1e-12)
 
-    
+    def test_extreme_ps_near_zero(self, monkeypatch: pytest.MonkeyPatch):
+        """When PS is near 0, X-learner should mostly use tau_1(x).
+
+        Validation goal:
+            - 当 ps ≈ 0 时, 公式变成: cate ≈ 1*tau_1 + 0*tau_0, 所以输出应该“几乎完全跟着 tau_1 走”。
+            - e(x)≈0 => tau_hat(x)≈tau1_hat(x)
+
+        Why correlation: 为什么用相关系数 corr, 而不是像前面一样用 allclose ?
+            - cate = 0.99 * tau_1 + 0.01 * tau_0 (PS = 0.01)
+            - 因此理论上 cate 并不是完全等于 tau_1 (还混杂了 1% 的tau_0), 但是两者的排序/方向应该高度一致
+            - 用 corr(cate, tau_1) > 0.95 是在测“排序/方向性一致”，对尺度微扰更宽容（也更贴近 uplift 的排序目标）
+
+        flaky 风险:
+            - 相关系数阈值 (0.95) 本质是统计量，理论上可能受随机抽样影响
+            - 数据量 n = 1000 且 tau 独立正态，风险很低
+            - 如果需要可以通过 (增大 n / 固定随机种子 / 避免 tau 高相关) 来更进一步降低 flaky
+        """
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=1000, random_state=42)
+        ps = np.full(len(X), 0.01, dtype=float)
+
+        rng = np.random.default_rng(7)
+        tau_1 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+        tau_0 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            if clf_calls["n"] == 1:
+                return _DummyClassifier(0.20)
+            if clf_calls["n"] == 2:
+                return _DummyClassifier(0.30)
+            raise AssertionError("Unexpected number of classifier fits")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, pred: np.ndarray):
+                self._pred = np.asarray(pred, dtype=float).reshape(-1)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                if int(len(X_in)) != int(len(self._pred)):
+                    raise AssertionError("Prediction length mismatch")
+                return self._pred
+
+        reg_calls = {"n": 0}
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            reg_calls["n"] += 1
+            if reg_calls["n"] == 1:
+                return _DummyRegressor(tau_1)
+            if reg_calls["n"] == 2:
+                return _DummyRegressor(tau_0)
+            raise AssertionError("Unexpected number of regressor fits")
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(
+            X,
+            T,
+            Y,
+            ps,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+
+        corr = float(np.corrcoef(cate, tau_1)[0, 1])
+        assert np.isfinite(corr)
+        assert corr > 0.95
+
+    def test_extreme_ps_near_one(self, monkeypatch: pytest.MonkeyPatch):
+        """
+        When PS is near 1, X-learner should mostly use tau_0(x)
+        Expectation: corr(cate, tau_0_prediction) > 0.95
+        """
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=1000, random_state=42)
+        ps = np.full(len(X), 0.99, dtype=float)
+
+        rng = np.random.default_rng(8)
+        tau_1 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+        tau_0 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            if clf_calls["n"] == 1:
+                return _DummyClassifier(0.20)
+            if clf_calls["n"] == 2:
+                return _DummyClassifier(0.30)
+            raise AssertionError("Unexpected number of classifier fits")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, pred: np.ndarray):
+                self._pred = np.asarray(pred, dtype=float).reshape(-1)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                if int(len(X_in)) != int(len(self._pred)):
+                    raise AssertionError("Prediction length mismatch")
+                return self._pred
+
+        reg_calls = {"n": 0}
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            reg_calls["n"] += 1
+            if reg_calls["n"] == 1:
+                return _DummyRegressor(tau_1)
+            if reg_calls["n"] == 2:
+                return _DummyRegressor(tau_0)
+            raise AssertionError("Unexpected number of regressor fits")
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(
+            X,
+            T,
+            Y,
+            ps,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+
+        corr = float(np.corrcoef(cate, tau_0)[0, 1])
+        assert np.isfinite(corr)
+        assert corr > 0.95
+
+    def test_uniform_ps_equal_weight(self, monkeypatch: pytest.MonkeyPatch):
+        """
+        When PS is uniform 0.5, X-learner should average tau_1 and tau_0
+
+        Validation goal:
+            - 当 ps = 0.5 常数时, 公式应该退化成简单平均:
+            - e(x) = 0.5 => tau_hat(x) = 0.5 * tau1_hat(x) + 0.5 * tau0_hat(x)
+            - 这是一个 "对称性检查", 如果把权重写反或漏了, 就会直接报错
+        """
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=1000, random_state=42)
+        ps = np.full(len(X), 0.50, dtype=float)
+
+        rng = np.random.default_rng(9)
+        tau_1 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+        tau_0 = rng.normal(loc=0.0, scale=0.05, size=len(X))
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        clf_calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            clf_calls["n"] += 1
+            if clf_calls["n"] == 1:
+                return _DummyClassifier(0.20)
+            if clf_calls["n"] == 2:
+                return _DummyClassifier(0.30)
+            raise AssertionError("Unexpected number of classifier fits")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, pred: np.ndarray):
+                self._pred = np.asarray(pred, dtype=float).reshape(-1)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                if int(len(X_in)) != int(len(self._pred)):
+                    raise AssertionError("Prediction length mismatch")
+                return self._pred
+
+        reg_calls = {"n": 0}
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            reg_calls["n"] += 1
+            if reg_calls["n"] == 1:
+                return _DummyRegressor(tau_1)
+            if reg_calls["n"] == 2:
+                return _DummyRegressor(tau_0)
+            raise AssertionError("Unexpected number of regressor fits")
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(
+            X,
+            T,
+            Y,
+            ps,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+
+        expected = 0.5 * tau_1 + 0.5 * tau_0
+        np.testing.assert_allclose(cate, expected, rtol=0.0, atol=1e-12)
+
+
 
