@@ -653,6 +653,10 @@ def compute_qini(
         # -------------------------------------------
         # 1) Validation
         # -------------------------------------------
+        if T is None:
+            raise ValueError("T cannot be None")
+        if Y is None:
+            raise ValueError("Y cannot be None")
         cate_arr = np.asarray(cate, dtype=float).reshape(-1)
         if cate_arr.ndim != 1:
             raise ValueError("cate must be a 1D array")

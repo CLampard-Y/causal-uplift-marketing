@@ -697,3 +697,134 @@ class TestQiniBasicFunctionality:
         assert out["qini_y"][5] > out["random_y"][5]
         assert out["qini_y"][-1] == pytest.approx(out["random_y"][-1], abs=1e-12)
 
+class TestInputValidation:
+    def test_none_input_raises_error(self):
+        """
+        Validation Goal:
+            - 传入 X 为 None 给 fit_x_learner 时, 必须抛出错误
+            - 传入 T 为 None 给 compute_qini 时, 必须抛出错误
+            - 传入 Y 为 None 给 compute_qini 时, 必须抛出错误
+
+        Attention: 
+            - learner会把 validation error 包装成 RuntimeError
+            - 因此这里的断言是 RuntimeError 且 message 包含 "fit_x_learner failed: ..."
+        """
+        import src.uplift as uplift
+
+        X, T, Y, ps = _make_synthetic_uplift_data(n=100, random_state=42)
+
+        # Learners wrap validation errors into RuntimeError.
+        with pytest.raises(RuntimeError, match=r"fit_x_learner failed: X cannot be None"):
+            uplift.fit_x_learner(
+                None,  # type: ignore[arg-type]
+                T,
+                Y,
+                ps,
+                n_estimators=10,
+                max_depth=2,
+                random_state=42,
+            )
+
+        # compute_qini also wraps
+        # T/Y = None should always error with deterministic messages.
+        cate = np.zeros(len(T), dtype=float)
+
+        with pytest.raises(RuntimeError, match=r"compute_qini failed: T cannot be None"):
+            uplift.compute_qini(cate=cate, T=None, Y=Y, n_bins=20)  # type: ignore[arg-type]
+
+        with pytest.raises(RuntimeError, match=r"compute_qini failed: Y cannot be None"):
+            uplift.compute_qini(cate=cate, T=T, Y=None, n_bins=20)  # type: ignore[arg-type]
+
+    def test_empty_dataframe_raises_error(self):
+        """
+        Validation Goal:
+            - `fit_s_learner` 遇到空 X 必须报错 "X cannot be empty"
+        """
+        import src.uplift as uplift
+
+        X_empty = pd.DataFrame()
+        T_empty = pd.Series([], dtype=int)
+        Y_empty = pd.Series([], dtype=int)
+
+        with pytest.raises(RuntimeError, match=r"fit_s_learner failed: X cannot be empty"):
+            uplift.fit_s_learner(
+                X_empty,
+                T_empty,
+                Y_empty,
+                n_estimators=10,
+                max_depth=2,
+                random_state=42,
+            )
+
+    def test_non_binary_treatment_raises_error(self):
+        """
+        Validation Goal:
+            - Indicator 列 (T) 必须为二元组合
+            - 出现非法取值 (比如 2) 必须报错 "T must be binary (0/1)"
+        """
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=100, random_state=42)
+        T_bad = T.copy()
+        T_bad.iloc[0] = 2
+
+        with pytest.raises(RuntimeError, match=r"fit_t_learner failed: T must be binary \(0/1\)"):
+            uplift.fit_t_learner(
+                X,
+                T_bad,
+                Y,
+                n_estimators=10,
+                max_depth=2,
+                random_state=42,
+            )
+
+    def test_length_mismatch_raises_error(self):
+        """
+        Validation Goal:
+            - X, Y, T 三列必须等长
+            - 这里故意让 T_short 少一行, 必须精准报错
+        """
+        import src.uplift as uplift
+
+        X, T, Y, _ps = _make_synthetic_uplift_data(n=10, random_state=42)
+
+        # Mismatch between X and T should be caught in the shared validator.
+        T_short = T.iloc[:-1].reset_index(drop=True)
+        with pytest.raises(
+            RuntimeError,
+            match=r"fit_s_learner failed: Length mismatch: len\(X\)=10, len\(T\)=9, len\(Y\)=10",
+        ):
+            uplift.fit_s_learner(
+                X,
+                T_short,
+                Y,
+                n_estimators=10,
+                max_depth=2,
+                random_state=42,
+            )
+
+    def test_nan_in_features_raises_error(self):
+        """
+        Validation Goal:
+            - 特征列里必须不包含 NaN, 否则报错
+        """
+        import src.uplift as uplift
+
+        X, T, Y, ps = _make_synthetic_uplift_data(n=100, random_state=42)
+        X_nan = X.copy()
+        X_nan.iloc[0, 0] = np.nan
+
+        with pytest.raises(RuntimeError, match=r"fit_x_learner failed: X contains NaN values"):
+            uplift.fit_x_learner(
+                X_nan,
+                T,
+                Y,
+                ps,
+                n_estimators=10,
+                max_depth=2,
+                random_state=42,
+            )
+
+
+
+
