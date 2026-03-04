@@ -268,6 +268,256 @@ class TestSLearnerBasicFunctionality:
         expected_spw = float(n_neg / n_pos)
         assert captured["spw"] == pytest.approx(expected_spw, abs=1e-12)
 
+class TestTLearnerBasicFunctionality:
+    """
+    Typical workflow:
+        1) 用  _make_small_t_learner_data() 造一个小数据集，确保 treated/control 都不为空、并且每组都有正例
+        2) 用 monkeypatch 替换 src.uplift._fit_classifier_with_spw
+        3) 返回 deterministic 的 _DummyClassifier:
+            - _DummyClassifier(p).predict_proba(X) 永远输出固定概率 [1-p, p]
+            - 通过 "第几次 fit" 返回不同的 p, 来模拟 treated 模型 vs control 模型
+        4) 调用 uplift.fit_t_learner(...)
+        5) 断言输出 contract(type/shape/finite)或断言关键路径 (fit 的数据子集、权重、差分)
+    """
+    def _make_small_t_learner_data(self):
+        X = pd.DataFrame(
+            {
+                "f1": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "f2": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            }
+        )
+
+        # Alternate to guarantee non-empty treated/control groups.
+        T = pd.Series([1, 0, 1, 0, 1, 0], dtype=int, name="treatment")
+
+        # Ensure each group has at least one positive sample:
+        # - treated indices: 0,2,4 -> Y=[1,0,0] => spw_t = 2/1 = 2.0
+        # - control indices: 1,3,5 -> Y=[1,1,0] => spw_c = 1/2 = 0.5
+        Y = pd.Series([1, 1, 0, 1, 0, 0], dtype=int, name="conversion")
+        return X, T, Y
+
+    def test_returns_numpy_array(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y = self._make_small_t_learner_data()
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            calls["n"] += 1
+            return _DummyClassifier(0.30 if calls["n"] == 1 else 0.10)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_t_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        
+        assert isinstance(cate, np.ndarray)
+        assert cate.shape == (len(X),)
+        assert np.issubdtype(cate.dtype, np.floating)
+
+    def test_output_shape_matches_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y = self._make_small_t_learner_data()
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        calls = {"n": 0}
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            calls["n"] += 1
+            return _DummyClassifier(0.30 if calls["n"] == 1 else 0.10)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        X_pred = X.iloc[:4].copy(deep=True)
+        cate = uplift.fit_t_learner(
+            X,
+            T,
+            Y,
+            X_pred,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+        assert cate.shape == (len(X_pred),)
+
+    def test_cate_no_nan(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y = self._make_small_t_learner_data()
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        calls = {"n": 0}
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            calls["n"] += 1
+            return _DummyClassifier(0.30 if calls["n"] == 1 else 0.10)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_t_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+        assert np.isfinite(cate).all()
+
+    def test_treats_groups_independently(self, monkeypatch: pytest.MonkeyPatch):
+        """
+        Validation Goal: 
+            - "白盒 spy + 代数恒等式" 
+            - 证明 fit_t_learner 真的在两个子样本 (treated/control) 上分别训练两套模型
+            - 防止 fit_t_learner 把两个子样本搞混, 或者筛选条件写反
+        """
+        import src.uplift as uplift
+
+        X, T, Y = self._make_small_t_learner_data()
+
+        # Convert T to numpy array for search speed (np.flatnonzero)
+        t_arr = T.to_numpy(dtype=int, copy=False)
+        treat_idx = list(np.flatnonzero(t_arr == 1))
+        ctrl_idx = list(np.flatnonzero(t_arr == 0))
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        # List to Record the data passed to fit_classifier_with_spw
+        fit_calls = []
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            fit_calls.append(
+                {
+                    "index": list(X_in.index),
+                    "y": y_in.copy(),
+                    "spw": float(scale_pos_weight),
+                }
+            )
+            # model_1 then model_0
+            return _DummyClassifier(0.30 if len(fit_calls) == 1 else 0.10)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        cate = uplift.fit_t_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+
+        assert len(fit_calls) == 2
+        assert fit_calls[0]["index"] == treat_idx
+        assert fit_calls[1]["index"] == ctrl_idx
+
+        y0 = fit_calls[0]["y"]
+        y1 = fit_calls[1]["y"]
+        assert isinstance(y0, pd.Series)
+        assert isinstance(y1, pd.Series)
+        pd.testing.assert_series_equal(y0, Y.iloc[treat_idx], check_names=False)
+        pd.testing.assert_series_equal(y1, Y.iloc[ctrl_idx], check_names=False)
+
+        # With constant p1=0.30 and p0=0.10, cate should be constant 0.20.
+        np.testing.assert_allclose(cate, 0.20, rtol=0.0, atol=1e-12)
+
+    def test_scale_pos_weight_per_group(self, monkeypatch: pytest.MonkeyPatch):
+        """
+        Validation Goal:
+            - 验证 T-learner 的 treated/control 两个子模型必须分别计算各自的 spw
+            - 如果全局用同一个权重, 在转化率低的情况下, 两个模型会被不同程度地 "淹没", 排序会出现问题
+        """
+        import src.uplift as uplift
+
+        X, T, Y = self._make_small_t_learner_data()
+        t_arr = T.to_numpy(dtype=int, copy=False)
+        treat_idx = list(np.flatnonzero(t_arr == 1))
+        ctrl_idx = list(np.flatnonzero(t_arr == 0))
+
+        y_t = Y.iloc[treat_idx]
+        y_c = Y.iloc[ctrl_idx]
+        spw_t = float(int((y_t == 0).sum()) / int((y_t == 1).sum()))
+        spw_c = float(int((y_c == 0).sum()) / int((y_c == 1).sum()))
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        captured = {"spw": []}
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            captured["spw"].append(float(scale_pos_weight))
+            # model_1 then model_0
+            return _DummyClassifier(0.30 if len(captured["spw"]) == 1 else 0.10)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        _ = uplift.fit_t_learner(X, T, Y, n_estimators=10, max_depth=2, random_state=42)
+
+        assert captured["spw"] == pytest.approx([spw_t, spw_c], abs=1e-12)
+
 class TestXLearnerPSWeighting:
     def test_ps_weighting_formula_correctness(self, monkeypatch: pytest.MonkeyPatch):
         """Validate final PS-weighted combination step.
