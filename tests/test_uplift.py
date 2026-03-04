@@ -504,5 +504,196 @@ class TestXLearnerPSWeighting:
         expected = 0.5 * tau_1 + 0.5 * tau_0
         np.testing.assert_allclose(cate, expected, rtol=0.0, atol=1e-12)
 
+class TestQiniBasicFunctionality:
+    """
+    Validation goal:
+        1) 这类验证不是在追求 "数据完全对齐"
+        2) 而是验证 `src/uplift.py::compute_qini`的一组不可被打破的性质
+            - 输出结构对、边界点对、随机排序不应有提升
+            - 完美排序必须优于随机基线
+            - 曲线端点必须收敛到同一个总 uplift
 
+    Overall Workflow: "从 API 合同 → 几何边界 → 业务语义" 的测试分层
+        1) 先验证 compute_qini 的输出结构 (dict keys/types/长度)
+        2) 再验证曲线边界点 (x 从 0 到 1, 起点三条线都是 0)
+        3) 然后做两类行为校验：
+            - 随机排序: Qini coefficient 期望接近 0
+            - 完美排序: Qini coefficient 必须为正且优于反向排序，并且在中间点超过随机线、在终点收敛
+    """
+    def test_returns_dict_with_required_keys(self):
+        """
+        Validation goal (schema test): Output type/keys/length Validation
+            1) `compute_qini` 返回值必须是 dict
+            2) 必须包含这些 key : `qini_x`, `qini_y`, `random_y`, `auuc`, `random_auuc`, `qini_coefficient`
+            3) 并且类型/长度要合理:
+                - `qini_x`, `qini_y`, `random_y` 必须是 list
+                - `len(...) == 21`
+                - 所有元素都是 finite, `auuc / random_auuc / qini_coefficient` 必须是 float
+        """
+        import src.uplift as uplift
+
+        n = 200
+        cate = np.linspace(-1.0, 1.0, num=n, dtype=float)
+        T = pd.Series(np.tile([1, 0], n // 2).astype(int))
+        Y = pd.Series(np.zeros(n, dtype=int))
+
+        # Type validation
+        out = uplift.compute_qini(cate=cate, T=T, Y=Y, n_bins=20)
+        assert isinstance(out, dict)
+
+        # Key validation
+        required = {
+            "qini_x",
+            "qini_y",
+            "random_y",
+            "auuc",
+            "random_auuc",
+            "qini_coefficient",
+        }
+        assert required.issubset(out.keys())
+
+        # Key columns type/length validation
+        assert isinstance(out["qini_x"], list)
+        assert isinstance(out["qini_y"], list)
+        assert isinstance(out["random_y"], list)
+        assert len(out["qini_x"]) == 21
+        assert len(out["qini_y"]) == 21
+        assert len(out["random_y"]) == 21
+
+        assert np.isfinite(np.asarray(out["qini_x"], dtype=float)).all()
+        assert np.isfinite(np.asarray(out["qini_y"], dtype=float)).all()
+        assert np.isfinite(np.asarray(out["random_y"], dtype=float)).all()
+        assert isinstance(out["auuc"], float)
+        assert isinstance(out["random_auuc"], float)
+        assert isinstance(out["qini_coefficient"], float)
+
+    def test_qini_x_starts_at_zero(self):
+        """
+        Validation goal:
+            - `qini_x[0] == 0.0`
+            - `qini_y[0] == 0.0`
+            - `random_y[0] == 0.0`
+        
+        Why:
+            - Qini 曲线起点必须是 0, 否则就是实现里 bin 边界/初始化错了
+            - 这属于几何边界不变量
+        """
+        import src.uplift as uplift
+
+        n = 200
+        cate = np.linspace(-1.0, 1.0, num=n, dtype=float)
+        T = pd.Series(np.tile([1, 0], n // 2).astype(int))
+        Y = pd.Series(np.zeros(n, dtype=int))
+
+        out = uplift.compute_qini(cate=cate, T=T, Y=Y, n_bins=20)
+
+        assert out["qini_x"][0] == 0.0
+        assert out["qini_y"][0] == 0.0
+        assert out["random_y"][0] == 0.0
+
+    def test_qini_x_ends_at_one(self):
+        """
+        Validation goal:
+            - `qini_x[-1] == 1.0`
+        
+        Why:
+            - targeting fraction 的终点必须覆盖全量人群 (100%)
+            - 否则说明 bin 边界计算 (比如 rounding、linspace 边界、clip) 出现 off-by-one bug
+            - 这属于几何边界不变量
+        """
+        import src.uplift as uplift
+
+        n = 200
+        cate = np.linspace(-1.0, 1.0, num=n, dtype=float)
+        T = pd.Series(np.tile([1, 0], n // 2).astype(int))
+        Y = pd.Series(np.zeros(n, dtype=int))
+
+        out = uplift.compute_qini(cate=cate, T=T, Y=Y, n_bins=20)
+
+        assert out["qini_x"][-1] == 1.0
+
+    def test_random_cate_qini_near_random_line(self):
+        """
+        Workflow:
+            1) 用 `_make_synthetic_uplift_data(n=5000)` 生成 T/Y (保证有 treated/control、有正例)
+            2) 生成 200 次不同的随机 cate (少数次随机容易发生 flaky)
+            3) 取 qini_coefficient 的均值 mean_coef
+            4) 断言 abs(mean_coef) < 0.5
+
+        Why:
+            - 如果 cate 是随机 (与真实 uplift 无关) 的, 那么其没有排序能力
+            - 此时理论上 Qini Coefficient 应接近 0 (与 random baseline 相近)
+        """
+        import src.uplift as uplift
+
+        _X, T, Y, _ps = _make_synthetic_uplift_data(n=5000, random_state=42)
+        rng = np.random.default_rng(42)
+
+        coefs = []
+        for _ in range(200):
+            cate = rng.uniform(low=-1.0, high=1.0, size=len(T))
+            out = uplift.compute_qini(cate=cate, T=T, Y=Y, n_bins=20)
+            coefs.append(float(out["qini_coefficient"]))
+
+        mean_coef = float(np.mean(coefs))
+        assert abs(mean_coef) < 0.2
+
+    def test_perfect_cate_qini_above_random(self):
+        """
+        Validation goal: Perfect uplift ranking should beat the random baseline
+
+        Workflow:
+            1) 构造一个 "可证明的完美 uplift 排序" 数据：
+                - 高 uplift 段: treated 必转化、control 不转化
+                - 低 uplift 段: 都不转化
+            2) 把 cate 设成段的 indicator (高段=1, 低段=0), 这就是 oracle ranking
+            3) 再打乱行顺序 (permute), 确保 compute_qini 必须 "真正按 cate 排序" 才能得到好结果
+            4) 断言包含 4 个层次：
+                - out["qini_coefficient"] > 0.0:
+                    整体优于随机
+
+                - out["qini_coefficient"] > out_bad["qini_coefficient"]:
+                    反向排序更差 (sanity check, 防止 sort 方向写反)
+
+                - out["qini_y"][5] > out["random_y"][5]:
+                    在某个中间分位点 (第 5 个 bin) oracle 曲线要在随机线之上
+
+                - out["qini_y"][-1] == approx(out["random_y"][-1]):
+                    端点收敛 (全量投放时，排序不重要，累计 uplift 和随机基线终点应该一致)
+        """
+        import src.uplift as uplift
+
+        n_high = 500
+        n_low = 1500
+        n = n_high + n_low
+        n_bins = 20
+
+        # Oracle ranking: high segment should be targeted first.
+        cate = np.concatenate([np.ones(n_high, dtype=float), np.zeros(n_low, dtype=float)])
+
+        # Alternate T to guarantee both groups appear in every prefix of sufficient size.
+        t = np.tile([1, 0], n // 2).astype(int)
+        T = pd.Series(t)
+
+        # Outcomes: only treated in the high segment converts.
+        y = np.zeros(n, dtype=int)
+        y[:n_high] = t[:n_high]
+        Y = pd.Series(y)
+
+        # Shuffle row order so compute_qini must actually sort by `cate`.
+        perm = np.random.default_rng(0).permutation(n)
+        cate = cate[perm]
+        T = T.iloc[perm].reset_index(drop=True)
+        Y = Y.iloc[perm].reset_index(drop=True)
+
+        out = uplift.compute_qini(cate=cate, T=T, Y=Y, n_bins=n_bins)
+
+        # Reversing the ranking should be worse (or at least not better).
+        out_bad = uplift.compute_qini(cate=-cate, T=T, Y=Y, n_bins=n_bins)
+
+        # Total uplift: treated mean = 0.25, control mean = 0 -> total_uplift = 0.25 * N_C = 250
+        assert out["qini_coefficient"] > 0.0
+        assert out["qini_coefficient"] > out_bad["qini_coefficient"]
+        assert out["qini_y"][5] > out["random_y"][5]
+        assert out["qini_y"][-1] == pytest.approx(out["random_y"][-1], abs=1e-12)
 
