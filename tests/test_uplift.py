@@ -518,6 +518,331 @@ class TestTLearnerBasicFunctionality:
 
         assert captured["spw"] == pytest.approx([spw_t, spw_c], abs=1e-12)
 
+class TestXLearnerBasicFunctionality:
+    def _make_small_x_learner_data(self):
+        X = pd.DataFrame(
+            {
+                "f1": [0.0, 1.0, 2.0, 3.0, 4.0, 5.0],
+                "f2": [10.0, 11.0, 12.0, 13.0, 14.0, 15.0],
+            }
+        )
+        T = pd.Series([1, 0, 1, 0, 1, 0], dtype=int, name="treatment")
+        # Ensure both groups have at least one positive sample.
+        Y = pd.Series([1, 0, 0, 1, 0, 0], dtype=int, name="conversion")
+        ps = np.full(len(X), 0.50, dtype=float)
+        return X, T, Y, ps
+
+    def test_returns_numpy_array(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, ps = self._make_small_x_learner_data()
+        treated_idx = set(X.index[T.to_numpy(dtype=int, copy=False) == 1].tolist())
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            # Identify which group is being fitted by indices.
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyClassifier(0.25 if is_treated else 0.15)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, value: float):
+                self._value = float(value)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.full(int(len(X_in)), self._value, dtype=float)
+
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            # First-stage pseudo-outcomes are irrelevant for this basic type/shape test.
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyRegressor(0.02 if is_treated else 0.01)
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(X, T, Y, ps, n_estimators=10, max_depth=2, random_state=42)
+        assert isinstance(cate, np.ndarray)
+        assert cate.shape == (len(X),)
+        assert np.issubdtype(cate.dtype, np.floating)
+
+    def test_output_shape_matches_input(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, ps = self._make_small_x_learner_data()
+        treated_idx = set(X.index[T.to_numpy(dtype=int, copy=False) == 1].tolist())
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyClassifier(0.25 if is_treated else 0.15)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, value: float):
+                self._value = float(value)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.full(int(len(X_in)), self._value, dtype=float)
+
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyRegressor(0.02 if is_treated else 0.01)
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        # X-learner requires ps_pred to match X_pred length.
+        X_pred = X.iloc[:4].copy(deep=True)
+        ps_pred = ps[: len(X_pred)].copy()
+
+        cate = uplift.fit_x_learner(
+            X,
+            T,
+            Y,
+            ps,
+            X_pred=X_pred,
+            ps_pred=ps_pred,
+            n_estimators=10,
+            max_depth=2,
+            random_state=42,
+        )
+        assert cate.shape == (len(X_pred),)
+
+    def test_cate_no_nan(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, ps = self._make_small_x_learner_data()
+        treated_idx = set(X.index[T.to_numpy(dtype=int, copy=False) == 1].tolist())
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyClassifier(0.25 if is_treated else 0.15)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, value: float):
+                self._value = float(value)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.full(int(len(X_in)), self._value, dtype=float)
+
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyRegressor(0.02 if is_treated else 0.01)
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(X, T, Y, ps, n_estimators=10, max_depth=2, random_state=42)
+        assert np.isfinite(cate).all()
+
+    def test_ps_weighting_applied(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, _ps = self._make_small_x_learner_data()
+        treated_idx = set(X.index[T.to_numpy(dtype=int, copy=False) == 1].tolist())
+
+        # Exercise clipping explicitly.
+        ps = np.asarray([0.0, 1.0, -1.0, 2.0, 0.50, 0.02], dtype=float)
+        ps_clipped = np.clip(ps, 0.01, 0.99)
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyClassifier(0.25 if is_treated else 0.15)
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def __init__(self, value: float):
+                self._value = float(value)
+
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.full(int(len(X_in)), self._value, dtype=float)
+
+        # Make tau_1 != tau_0 so PS weighting is observable.
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            is_treated = set(X_in.index).issubset(treated_idx)
+            return _DummyRegressor(0.10 if is_treated else 0.00)
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        cate = uplift.fit_x_learner(X, T, Y, ps, n_estimators=10, max_depth=2, random_state=42)
+        expected = (1.0 - ps_clipped) * 0.10 + ps_clipped * 0.00
+        np.testing.assert_allclose(cate, expected, rtol=0.0, atol=1e-12)
+
+    def test_cross_estimation_logic(self, monkeypatch: pytest.MonkeyPatch):
+        import src.uplift as uplift
+
+        X, T, Y, ps = self._make_small_x_learner_data()
+        t_arr = T.to_numpy(dtype=int, copy=False)
+        treated_mask = t_arr == 1
+        control_mask = ~treated_mask
+        treated_idx = set(X.index[treated_mask].tolist())
+        control_idx = set(X.index[control_mask].tolist())
+
+        # Fixed outcome model probabilities so pseudo-outcomes are deterministic.
+        p_mu1 = 0.40
+        p_mu0 = 0.10
+
+        y_treat = Y.loc[treated_mask].to_numpy(dtype=float, copy=False)
+        y_ctrl = Y.loc[control_mask].to_numpy(dtype=float, copy=False)
+        expected_d1 = y_treat - p_mu0
+        expected_d0 = p_mu1 - y_ctrl
+
+        class _DummyClassifier:
+            def __init__(self, p: float):
+                self._p = float(p)
+
+            def predict_proba(self, X_in: pd.DataFrame) -> np.ndarray:
+                n = int(len(X_in))
+                p = np.full(n, self._p, dtype=float)
+                return np.column_stack([1.0 - p, p])
+
+        def _fake_fit_classifier_with_spw(
+            X_in: pd.DataFrame,
+            y_in: pd.Series,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+            scale_pos_weight: float,
+        ):
+            # model_1 is trained on treated; model_0 on control.
+            if set(X_in.index).issubset(treated_idx):
+                return _DummyClassifier(p_mu1)
+            if set(X_in.index).issubset(control_idx):
+                return _DummyClassifier(p_mu0)
+            raise AssertionError("Unexpected indices passed to outcome model fit")
+
+        monkeypatch.setattr(uplift, "_fit_classifier_with_spw", _fake_fit_classifier_with_spw)
+
+        class _DummyRegressor:
+            def predict(self, X_in: pd.DataFrame) -> np.ndarray:
+                return np.zeros(int(len(X_in)), dtype=float)
+
+        reg_calls = {"treated": 0, "control": 0}
+
+        def _fake_fit_regressor(
+            X_in: pd.DataFrame,
+            y_in: np.ndarray,
+            *,
+            n_estimators: int,
+            max_depth: int,
+            random_state: int,
+        ):
+            y_arr = np.asarray(y_in, dtype=float).reshape(-1)
+
+            if set(X_in.index).issubset(treated_idx):
+                reg_calls["treated"] += 1
+                np.testing.assert_allclose(y_arr, expected_d1, rtol=0.0, atol=1e-12)
+                return _DummyRegressor()
+            if set(X_in.index).issubset(control_idx):
+                reg_calls["control"] += 1
+                np.testing.assert_allclose(y_arr, expected_d0, rtol=0.0, atol=1e-12)
+                return _DummyRegressor()
+            raise AssertionError("Unexpected indices passed to tau model fit")
+
+        monkeypatch.setattr(uplift, "_fit_regressor", _fake_fit_regressor)
+
+        _ = uplift.fit_x_learner(X, T, Y, ps, n_estimators=10, max_depth=2, random_state=42)
+
+        assert reg_calls["treated"] == 1
+        assert reg_calls["control"] == 1
+
 class TestXLearnerPSWeighting:
     def test_ps_weighting_formula_correctness(self, monkeypatch: pytest.MonkeyPatch):
         """Validate final PS-weighted combination step.
