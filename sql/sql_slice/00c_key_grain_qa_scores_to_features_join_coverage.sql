@@ -1,6 +1,7 @@
 -- =======================================
 --  Join Fan-Out Check
 -- =======================================
+-- Grain: customer
 -- Checked Table: analytics.uplift_scores
 -- Check list:
 --   1) The uniqueness of customer_id in certain (score_date, model_version) pair

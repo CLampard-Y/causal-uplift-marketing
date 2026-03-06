@@ -1,6 +1,7 @@
 -- =======================================
 --  Grain Check
 -- =======================================
+-- Grain: customer
 -- Checked Table: analytics.hillstrom_features
 -- Check list:
 --   1) 1 row = 1 customer_id 
