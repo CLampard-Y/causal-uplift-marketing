@@ -1,18 +1,18 @@
 -- ===================================
---  Rational Check of Data
+--  Q1 - Experiment sanity by arm
 -- ===================================
 -- Grain: customer
 -- Checked Table: analytics.hillstrom_features
--- Cheeck List:
+-- Check list:
 --   1) Assignment Error:
 --     - treatment/control 比例不对
 --     - 说明抽样、过滤、导入有问题
 --   2) Outcome Error:
 --     - conversion rate 过高/过低、不像这个业务
---     - revenue 明显异常
+--     - avg_customer_revenue_per_user 明显异常
 --   3) Data Contract Error:
 --     - 同一个用户重复
---     - customer revenue 出现负值
+--     - customer_revenue（spend 的报表别名）出现负值
 --     - 说明 metric pipeline 可能出错
 
 WITH base AS (

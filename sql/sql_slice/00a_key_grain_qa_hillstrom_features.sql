@@ -1,7 +1,7 @@
 -- =======================================
---  Grain Check
+--  Q0a - Key + grain QA: hillstrom_features，
 -- =======================================
--- Grain: customer
+-- Grain: 1 row = 1 customer_id
 -- Checked Table: analytics.hillstrom_features
 -- Check list:
 --   1) 1 row = 1 customer_id 
@@ -9,12 +9,13 @@
 --   3) Null customer_id
 --   4) Null treatment
 --   5) Null conversion
---   6) Null spend
+--   6) Null spend (customer spend outcome, not marketing cost)
 
 SELECT
   COUNT(*) AS n_rows,
   COUNT(DISTINCT customer_id) AS n_customers,
-  -- ATTENTION: COUNT(*) will include NULL rows
+  -- COUNT(*) - COUNT(DISTINCT customer_id) also captures null-key rows.
+  -- Read it together with n_null_customer_id.
   COUNT(*) - COUNT(DISTINCT customer_id) AS n_duplicate_rows,
   SUM((customer_id IS NULL)::int) AS n_null_customer_id,
   SUM((treatment IS NULL)::int) AS n_null_treatment,

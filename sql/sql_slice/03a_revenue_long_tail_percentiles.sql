@@ -1,13 +1,14 @@
 -- ===================================
---  Outcome Long-tail Sanity Check
+--  Q3a - Customer revenue long-tail percentiles
 -- ===================================
 -- Grain: treatment (treatment/control)
 -- Checked Table: analytics.hillstrom_features
--- Cheeck List: 
---   1) Percentiles (p50/p90/p99)
+-- Check list:
+--   1) customer_revenue percentiles (p50/p90/p99)
 --   2) Mean (compare with p50)
 --   3) Max (compare with p99)
---   4) Standard Deviation
+--   4) Standard deviation
+-- Note: customer_revenue is a reporting alias for spend.
 WITH 
 base AS (
   SELECT

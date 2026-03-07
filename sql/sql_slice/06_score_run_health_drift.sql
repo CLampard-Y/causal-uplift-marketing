@@ -1,12 +1,15 @@
 -- ===================================
---  Score-run Health & Drift Monitoring
+--  Q6 - Score-run health snapshot
 -- ===================================
--- Param: {{model_version}}
--- Checked Table: analytics.hillstrom_features
--- Cheeck List: 
+-- Params: {{model_version}}  -- output one row per score_date within the selected model_version
+-- Checked Table: analytics.uplift_scores
+-- Check list:
 --   1) Pct_scored
 --   2) Quantiles
 --   3) Min/Max Score
+-- Note: 
+--    1) 这张表输出的是 snapshot 快照，是否发生 drift 需要人工跨 score_date 对比判断
+--    2) 只有当前 Score 批次健康且与其余历史对比无明显异常后，再继续进行 Q7 / Q8 / Q9
 
 WITH 
 scores AS (

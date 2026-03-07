@@ -1,13 +1,13 @@
 -- =======================================
---  Uniqueness Check
+--  Q0b - Key + grain QA: uplift_scores score-run uniqueness
 -- =======================================
--- Grain: customer
+-- Grain: customer_id within one (score_date, model_version) score run
 -- Checked Table: analytics.uplift_scores
 -- Check list:
---   1) The uniqueness of customer_id in certain (score_date, model_version) pair
---   2) There are two conditions:
---     2.1) Duplicate customer (same customer_id, same uplift_score)
---     2.2) Conflicting duplicate customer (same customer_id, different uplift_score)
+--   1) Enforce uniqueness of (customer_id, score_date, model_version)
+--   2) Detect duplicate customer rows within the selected score run
+--   3) Detect conflicting duplicate customer rows with different uplift_score
+--   4) Any duplicate/conflict means the Q0 data-quality gate fails
 
 WITH score_run_raw AS (
   SELECT
@@ -16,7 +16,7 @@ WITH score_run_raw AS (
     model_version,
     uplift_score::numeric AS uplift_score
   FROM analytics.uplift_scores
-  -- select certain (score_date, model_version) pair
+  -- Filter to one score run: (score_date, model_version).
   WHERE score_date = {{score_date}}
     AND model_version = {{model_version}}
 ),
@@ -41,7 +41,7 @@ dup_stats AS (
   FROM by_customer
 )
 
--- 生成最终的单行汇总报告
+-- Single-row contract summary for the selected score run.
 SELECT
   r.score_date,
   r.model_version,
@@ -52,10 +52,9 @@ SELECT
   (COUNT(r.customer_id) - COUNT(DISTINCT r.customer_id)) AS n_duplicate_rows_non_null,    -- 重复的行数 (重复污染强度)
   SUM((r.uplift_score IS NULL)::int) AS n_null_scores,
 
-  -- 防空处理
-  COALESCE(d.n_duplicate_customers, 0) AS n_duplicate_customers,                          -- 出现重复的用户数 (受污染的用户数)
-  COALESCE(d.max_rows_per_customer, 0) AS max_rows_per_customer,                          -- 重复行数最多的用户 (受污染的强度)
-  COALESCE(d.n_conflicting_duplicate_customers, 0) AS n_conflicting_duplicate_customers   -- 得分矛盾的用户数
+  COALESCE(d.n_duplicate_customers, 0) AS n_duplicate_customers,                        -- Number of customers affected by duplicates
+  COALESCE(d.max_rows_per_customer, 0) AS max_rows_per_customer,                        -- Worst duplicate intensity for one customer
+  COALESCE(d.n_conflicting_duplicate_customers, 0) AS n_conflicting_duplicate_customers -- Duplicate customers with conflicting scores
 FROM score_run_raw r
 CROSS JOIN dup_stats d
 GROUP BY

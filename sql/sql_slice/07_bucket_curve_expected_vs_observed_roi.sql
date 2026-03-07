@@ -1,8 +1,9 @@
 -- ===================================
---  Bucket Curve
+--  Q7 - Bucket curve: expected vs observed ROI
 -- ===================================
 -- Params: {{score_date}}, {{model_version}}, {{n_buckets}}, {{min_cell_n}}, {{cost_per_contact}}
 -- Checked Table: analytics.uplift_scores, analytics.hillstrom_features
+-- Note: 如果 Q0 查询失败，则 validated_scores 会按照设计返回 0 行
 
 WITH score_run_raw AS (
   SELECT
@@ -120,7 +121,7 @@ SELECT
     / NULLIF((w.n_users * {{cost_per_contact}}::numeric), 0)
   ) AS observed_roi_conv_per_cost_marginal,
 
-  -- Cumulative coverage and ROI (top buckets)
+  -- Cumulative coverage and ROI (highest-score buckets first)
   SUM(w.n_users) OVER (ORDER BY w.bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cum_users,
   (SUM(w.n_users) OVER (ORDER BY w.bucket ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW))::float
     / NULLIF(t.total_users::float, 0) AS cum_coverage,

@@ -1,12 +1,13 @@
 -- ===================================
---  Heterogeneity Template (example: channel)
+--  Q5 - Heterogeneity template: channel slice
 -- ===================================
--- Param: {{min_cell_n}}
+-- Params: {{min_cell_n}}  -- minimum treated/control rows required per segment
 -- Checked Table: analytics.hillstrom_features
--- Motivation: 协变量异质性 (Heterogeneity) 模板化观察
--- Cheeck List: 
---   1) Uplift conversion
---   2) Uplift customer revenue
+-- Motivation: 探索 channel 协变量的异质性
+-- Check list:
+--   1) uplift_conversion
+--   2) uplift_customer_revenue (customer spend outcome)
+-- Note: 这是一个通用的实验模板，可以在其他协变量上进行
 WITH 
 base AS (
   SELECT

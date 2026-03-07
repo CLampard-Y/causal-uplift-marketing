@@ -1,11 +1,12 @@
 -- ===================================
---  Balance Diagnostic 
+--  Q4 - Balance diagnostic (SMD + missingness)
 -- ===================================
--- Grain: Covariate (Pre-treatment)
+-- Grain: pre-treatment covariate
 -- Checked Table: analytics.hillstrom_features
--- Motivation: treatment/control 的协变量平衡性 (Uplift可行性第一步)
+-- Motivation: 在分析 uplift 或 ROI 前，进行预处理协变量平衡性诊断以确保数据质量
 --   1) SMD (treatment/control)
 --   2) Missingness Difference (treatment/control)
+-- Gate: abs(SMD) < 0.10 是通常情况下的可接受范围
 
 
 WITH 

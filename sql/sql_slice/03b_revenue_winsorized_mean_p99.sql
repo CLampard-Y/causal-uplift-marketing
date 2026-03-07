@@ -1,9 +1,10 @@
 -- ===================================
---  Winsorized Reporting Guardrail (Reporting-only)
+--  Q3b - Customer revenue winsorized mean (p99, reporting only)
 -- ===================================
 -- Grain: treatment (treatment/control)
 -- Checked Table: analytics.hillstrom_features
--- Motivation: 检查 revenue 故事对极端值的依赖程度
+-- Motivation: 检查 customer_revenue（spend 的报表别名）对极端值的依赖程度
+-- Note: 只用于报表稳健性 (避免被长尾极端数据主导) ，不影响主要结论。
 
 WITH 
 p AS (

@@ -1,11 +1,12 @@
 -- ===================================
---  Naive ATE & Rough ROI Check
+--  Q2 - Naive ATE + CI + ROI sanity
 -- ===================================
 -- Grain: treatment (treatment/control)
 -- Checked Table: analytics.hillstrom_features
--- Cheeck List: 
+-- Check list:
 --   1) Naive ATE
---   2) Rough ROI
+--   2) ROI sanity
+-- Note: spend is aliased as customer_revenue for reporting; marketing cost comes from cost_per_contact.
 
 WITH 
 base AS (
@@ -63,20 +64,20 @@ SELECT
   customer_revenue_control,
   ate_customer_revenue,
 
-  -- 粗略的增量转化与增量收入计算
+  -- Naive incremental conversions and customer_revenue accounting.
   (ate_conversion * n_treated) AS inc_conversions_on_treated,             -- 增量转化数
-  (ate_customer_revenue * n_treated) AS inc_customer_revenue_on_treated,  -- 增量收入
+  (ate_customer_revenue * n_treated) AS inc_customer_revenue_on_treated,  -- 增量 customer_revenue
 
-  -- 粗略 ROI 计算
-  {{cost_per_contact}}::numeric AS cost_per_contact,                       -- treated 单位成本设定
-  (n_treated * {{cost_per_contact}}::numeric) AS treated_cost,             -- 总 treated 成本
+  -- ROI sanity under a per-contact marketing-cost assumption.
+  {{cost_per_contact}}::numeric AS cost_per_contact,                       -- Per-contact marketing cost assumption
+  (n_treated * {{cost_per_contact}}::numeric) AS treated_cost,             -- Contact cost if all treated users were contacted
   
   -- 每单位成本带来的增量转化
   (ate_conversion * n_treated)
     / NULLIF((n_treated * {{cost_per_contact}}::numeric), 0) AS roi_conv_per_cost,             
   
-  -- 每单位成本带来的增量客户收入
-  -- 这不是利润率 (revenue 不等于 margin)
+  -- 每单位营销成本带来的增量 customer_revenue
+  -- 这不是利润率（customer_revenue 不等于 margin）
   (ate_customer_revenue * n_treated)
     / NULLIF((n_treated * {{cost_per_contact}}::numeric), 0) AS inc_customer_revenue_per_cost
 FROM stats;

@@ -1,8 +1,11 @@
 -- ===================================
---  Budget Allocation Helper
+--  Q8 - Budget allocation helper
 -- ===================================
 -- Params: {{score_date}}, {{model_version}}, {{budget_n_users}}, {{cost_per_contact}}
 -- Checked Table: analytics.uplift_scores, analytics.hillstrom_features
+-- Note: 
+--   1) 文件名是 legacy，当前逻辑不是 ROI-ratio argmax，而是预算上限下的 uplift_score > 0 top-K helper
+--   2) 当前 SQL 未实现 ROI 过滤
 
 WITH score_run_raw AS (
   SELECT
@@ -76,6 +79,7 @@ curve AS (
   WHERE recommended_n_users <= {{budget_n_users}}
 ),
 best AS (
+  -- Choose the largest feasible positive-uplift top-K within budget_n_users.
   SELECT *
   FROM curve
   ORDER BY recommended_n_users DESC
