@@ -5,7 +5,8 @@
 -- Checked Table: analytics.uplift_scores, analytics.hillstrom_features
 -- Note: 如果 Q0 查询失败，则 validated_scores 会按照设计返回 0 行
 
-WITH score_run_raw AS (
+WITH 
+score_run_raw AS (
   SELECT
     customer_id,
     score_date,
@@ -17,6 +18,7 @@ WITH score_run_raw AS (
     AND uplift_score IS NOT NULL
     AND customer_id IS NOT NULL
 ),
+
 score_key_counts AS (
   SELECT
     customer_id,
@@ -24,6 +26,7 @@ score_key_counts AS (
   FROM score_run_raw
   GROUP BY customer_id
 ),
+
 feature_key_counts AS (
   SELECT
     customer_id,
@@ -32,6 +35,7 @@ feature_key_counts AS (
   WHERE customer_id IS NOT NULL
   GROUP BY customer_id
 ),
+
 contract_gate AS (
   SELECT
     COUNT(*) AS n_scored_customers,
@@ -42,6 +46,7 @@ contract_gate AS (
   LEFT JOIN feature_key_counts f
     ON f.customer_id = s.customer_id
 ),
+
 validated_scores AS (
   SELECT
     r.customer_id,
@@ -54,6 +59,7 @@ validated_scores AS (
     AND g.n_missing_feature_customers = 0
     AND g.n_multi_match_feature_customers = 0
 ),
+
 scored AS (
   SELECT
     s.customer_id,
@@ -66,12 +72,14 @@ scored AS (
     ON f.customer_id = s.customer_id
   CROSS JOIN contract_gate g
 ),
+
 bucketed AS (
   SELECT
     *,
     NTILE({{n_buckets}}) OVER (ORDER BY uplift_score DESC NULLS LAST, customer_id) AS bucket
   FROM scored
 ),
+
 by_bucket AS (
   SELECT
     bucket,
@@ -85,6 +93,7 @@ by_bucket AS (
   FROM bucketed
   GROUP BY bucket
 ),
+
 with_uplift AS (
   SELECT
     bucket,
@@ -97,9 +106,11 @@ with_uplift AS (
     (cr_treated - cr_control) * n_users AS observed_inc_conv_bucket
   FROM by_bucket
 ),
+
 totals AS (
   SELECT SUM(n_users) AS total_users FROM with_uplift
 )
+
 SELECT
   w.bucket,
   w.n_users,
