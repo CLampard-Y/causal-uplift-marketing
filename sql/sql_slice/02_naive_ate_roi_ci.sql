@@ -1,11 +1,11 @@
-# ===================================
-#  Naive ATE & Rough ROI Check
-# ===================================
-# Grain: treatment (treatment/control)
-# Checked Table: analytics.hillstrom_features
-# Cheeck List: 
-#   1) Naive ATE
-#   2) Rough ROI
+-- ===================================
+--  Naive ATE & Rough ROI Check
+-- ===================================
+-- Grain: treatment (treatment/control)
+-- Checked Table: analytics.hillstrom_features
+-- Cheeck List: 
+--   1) Naive ATE
+--   2) Rough ROI
 
 WITH 
 base AS (

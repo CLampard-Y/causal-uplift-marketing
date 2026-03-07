@@ -1,9 +1,9 @@
-# ===================================
-#  Winsorized Reporting Guardrail (Reporting-only)
-# ===================================
-# Grain: treatment (treatment/control)
-# Checked Table: analytics.hillstrom_features
-# Motivation: 检查 revenue 故事对极端值的依赖程度
+-- ===================================
+--  Winsorized Reporting Guardrail (Reporting-only)
+-- ===================================
+-- Grain: treatment (treatment/control)
+-- Checked Table: analytics.hillstrom_features
+-- Motivation: 检查 revenue 故事对极端值的依赖程度
 
 WITH 
 p AS (

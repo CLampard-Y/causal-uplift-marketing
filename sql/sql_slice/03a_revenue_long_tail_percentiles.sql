@@ -1,13 +1,13 @@
-# ===================================
-#  Outcome Long-tail Sanity Check
-# ===================================
-# Grain: treatment (treatment/control)
-# Checked Table: analytics.hillstrom_features
-# Cheeck List: 
-#   1) Percentiles (p50/p90/p99)
-#   2) Mean (compare with p50)
-#   3) Max (compare with p99)
-#   4) Standard Deviation
+-- ===================================
+--  Outcome Long-tail Sanity Check
+-- ===================================
+-- Grain: treatment (treatment/control)
+-- Checked Table: analytics.hillstrom_features
+-- Cheeck List: 
+--   1) Percentiles (p50/p90/p99)
+--   2) Mean (compare with p50)
+--   3) Max (compare with p99)
+--   4) Standard Deviation
 WITH 
 base AS (
   SELECT
