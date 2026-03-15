@@ -46,11 +46,18 @@ Common files generated after running the notebooks.
   - 含 coverage 指标（如 `match_rate_max`, `treated_utilization`）与配对完整性标记
   - 业务解释：coverage 低意味着 common support 有限，此时估计目标会被限制在匹配/重叠子样本（trimmed estimand）
 - `data/processed/cate_vectors.npz`
-  - Saved CATE vectors for meta-learners (Notebook 04)
-  - 便于快速复现实验（无需重复训练即可重画分布/做 ROI 模拟）
+  - Saved full-sample CATE vectors for all meta-learners (Notebook 04, after held-out Qini comparison)
+  - 便于 Phase 3 在不重复训练的情况下直接读取全样本 CATE；同时包含与 `hillstrom_features.csv` 对齐的 `customer_id`，供导出校验使用
 - `data/processed/qini_results.json`
-  - AUUC/Qini evaluation results (Notebook 04)
-  - uplift 排序指标的结果快照，便于回归对比（防止排序方向/分箱边界回归）
+  - Held-out AUUC/Qini evaluation results + selected learner metadata (Notebook 04)
+  - uplift 排序指标与 `best_learner` 的结果快照，便于回归对比，并为 Phase 3 指定上游选型
+- `data/processed/user_segments.csv`
+  - Derived user-level segmentation export (Notebook 05)
+  - 由 `data/processed/cate_vectors.npz` + `data/processed/qini_results.json` 派生，用于本地 SQL demo；默认列包括 `customer_id`, `score_date`, `model_version`, `uplift_score`, `cate`, `baseline_prob`, `segment`
+  - 其中 `uplift_score` / `cate` 对应 `qini_results.json.meta.best_learner` 指向的全样本 CATE 向量；`customer_id` 是 repo-local surrogate key（与 `hillstrom_features.csv` 行顺序对齐），生产环境应替换为稳定业务主键
+- `data/processed/roi_simulation.json`
+  - ROI simulation results (Notebook 05)
+  - Full / Random 基线、selected `Persuadables only` policy，以及补充 `budget_sweep` 结果快照，便于回归比对与审计
 - `data/processed/placebo_results.json`
   - Placebo / permutation test results (Notebook 06)
   - 置换 T 后如果效果仍显著，说明存在实现错误/数据泄漏/评估偏差等高风险问题
@@ -62,6 +69,7 @@ Run from repo root.
 
 1) Put the dataset at `data/raw/hillstrom.csv`.
 2) Run notebooks in order under `notebooks/` (01 -> 05).
+   - `notebooks/05_segmentation_and_roi.ipynb` will consume `data/processed/cate_vectors.npz` and `data/processed/qini_results.json`, then generate `data/processed/user_segments.csv` and `data/processed/roi_simulation.json`.
 3) Optional: run `notebooks/06_robustness_checks.ipynb` to generate `data/processed/placebo_results.json`.
 
 Minimal acceptance gate:

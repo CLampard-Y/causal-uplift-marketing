@@ -295,6 +295,112 @@ def segment_users(
         raise RuntimeError(f"segment_users failed: {exc}") from exc
 
 
+def prepare_user_segments_export(
+    segments_df: pd.DataFrame,
+    *,
+    customer_id: Sequence[int] | np.ndarray | pd.Series,
+    score_date: str,
+    model_version: str,
+) -> pd.DataFrame:
+    """
+    Validate and canonicalize the Phase 3 user-level segment artifact.
+    Parameters
+    ----------
+    segments_df : pd.DataFrame
+        output of `segment_users(...)`
+    Returns
+    -------
+    pd.DataFrame
+        canonical export with columns:
+        customer_id, score_date, model_version, uplift_score, cate, baseline_prob, segment
+    """
+    try:
+        if not isinstance(segments_df, pd.DataFrame) or segments_df.empty:
+            raise ValueError("segments_df must be a non-empty pandas.DataFrame")
+        customer_id_series = pd.Series(customer_id)
+        if customer_id_series.empty:
+            raise ValueError("customer_id must be a non-empty sequence")
+        if len(customer_id_series) != len(segments_df):
+            raise ValueError("customer_id length mismatch vs segments_df")
+        if not isinstance(score_date, str) or not score_date.strip():
+            raise ValueError("score_date must be a non-empty string")
+        if not isinstance(model_version, str) or not model_version.strip():
+            raise ValueError("model_version must be a non-empty string")
+
+        parsed_score_date = pd.to_datetime(score_date, errors="coerce")
+        if pd.isna(parsed_score_date):
+            raise ValueError("score_date must be parseable as a date")
+        score_date_text = str(parsed_score_date.date())
+        model_version_text = model_version.strip()
+
+        customer_id_numeric = pd.to_numeric(customer_id_series, errors="coerce")
+        if customer_id_numeric.isnull().any():
+            raise ValueError("customer_id contains NaN/non-numeric values")
+        customer_id_arr = customer_id_numeric.to_numpy(dtype=float, copy=False)
+        if not np.isfinite(customer_id_arr).all():
+            raise ValueError("customer_id contains inf/-inf values")
+        if not np.allclose(customer_id_arr, np.round(customer_id_arr)):
+            raise ValueError("customer_id must contain integer-like values")
+        customer_id_int = np.round(customer_id_arr).astype(int)
+        if (customer_id_int <= 0).any():
+            raise ValueError("customer_id must be positive integers")
+        if len(np.unique(customer_id_int)) != len(customer_id_int):
+            raise ValueError("customer_id must be unique")
+
+        required_cols = {"cate", "baseline_prob", "segment"}
+        missing_cols = required_cols - set(segments_df.columns)
+        if missing_cols:
+            raise ValueError(f"segments_df missing required columns: {sorted(missing_cols)}")
+
+        if "_warning" in segments_df.columns:
+            warning_values = (
+                segments_df["_warning"]
+                .astype("string")
+                .dropna()
+                .str.strip()
+            )
+            warning_values = warning_values[warning_values != ""]
+            if len(warning_values) > 0:
+                unique_warnings = sorted(pd.unique(warning_values).tolist())
+                raise ValueError(
+                    "segments_df contains warning(s); refuse to export formal artifact: "
+                    f"{unique_warnings}"
+                )
+
+        export_df = segments_df.loc[:, ["cate", "baseline_prob", "segment"]].copy()
+        export_df["cate"] = pd.to_numeric(export_df["cate"], errors="coerce").astype(float)
+        export_df["baseline_prob"] = pd.to_numeric(export_df["baseline_prob"], errors="coerce").astype(float)
+
+        if export_df[["cate", "baseline_prob"]].isnull().any().any():
+            raise ValueError("segments_df contains NaN/non-numeric cate/baseline_prob values")
+        if not np.isfinite(export_df[["cate", "baseline_prob"]].to_numpy(dtype=float, copy=False)).all():
+            raise ValueError("segments_df contains inf/-inf cate/baseline_prob values")
+        if not export_df["baseline_prob"].between(0.0, 1.0).all():
+            raise ValueError("segments_df contains baseline_prob outside [0, 1]")
+
+        export_df["segment"] = export_df["segment"].astype("string")
+        if export_df["segment"].isnull().any():
+            raise ValueError("segments_df['segment'] contains NaN values")
+        if not set(pd.unique(export_df["segment"])).issubset(_SEGMENTS):
+            raise ValueError("segments_df contains unknown segment label(s)")
+
+        export_df.insert(0, "customer_id", customer_id_int)
+        export_df.insert(1, "score_date", score_date_text)
+        export_df.insert(2, "model_version", model_version_text)
+        export_df.insert(3, "uplift_score", export_df["cate"].to_numpy(dtype=float, copy=False))
+        if len(export_df) != len(segments_df):
+            raise ValueError("user_segments export length mismatch")
+        if not export_df["customer_id"].is_unique:
+            raise ValueError("user_segments export customer_id must be unique")
+
+        return export_df
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"prepare_user_segments_export failed: {exc}") from exc
+
+
 def simulate_roi(
     segments_df: pd.DataFrame,
     Y: pd.Series,

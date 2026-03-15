@@ -281,6 +281,7 @@ def build_features(df: pd.DataFrame, config) -> pd.DataFrame:
             raise ValueError(f"Missing required columns for feature engineering: {sorted(missing)}")
 
         features = df.copy()
+        features.insert(0, "customer_id", np.arange(1, len(features) + 1, dtype=np.int64))
 
         # -------------------------
         # 1) One-hot encoding
@@ -360,7 +361,9 @@ def build_features(df: pd.DataFrame, config) -> pd.DataFrame:
         assert len(zip_cols) > 0, "One-hot encoding for zip_code produced no `zip_*` columns."
         assert (features[zip_cols].sum(axis=1) == 1).all(), "Zip one-hot columns must sum to 1 per row."
 
-        # 6-8. Mandatory keep columns
+        # 6-9. Mandatory keep columns
+        assert "customer_id" in features.columns, "Missing required column: customer_id."
+        assert features["customer_id"].is_unique, "customer_id must be unique."
         assert "treatment" in features.columns, "Missing required column: treatment."
         assert "conversion" in features.columns, "Missing required column: conversion."
         assert "spend" in features.columns, "Missing required column: spend."
@@ -371,8 +374,8 @@ def build_features(df: pd.DataFrame, config) -> pd.DataFrame:
         assert "zip_code" not in features.columns, "Forbidden column present: zip_code."
         assert "visit" not in features.columns, "Forbidden column present: visit."
 
-        # 13. Column count bounds
-        assert 15 <= features.shape[1] <= 20, "Feature DataFrame must have between 15 and 20 columns."
+        # 14. Column count bounds
+        assert 16 <= features.shape[1] <= 21, "Feature DataFrame must have between 16 and 21 columns."
 
         # -------------------------
         # 6) Persist

@@ -13,6 +13,7 @@ paths:
   matched_data: "data/processed/hillstrom_matched.csv"
   cate_vectors: "data/processed/cate_vectors.npz"
   qini_results: "data/processed/qini_results.json"
+  user_segments: "data/processed/user_segments.csv"
 
 # Core business columns and modeling covariates
 data:
@@ -90,6 +91,11 @@ uplift:
   
   # collinearity_guard: true
   # correlation_threshold: 0.95         # drop one of highly correlated feature pairs
+
+# Phase 3 export metadata
+phase3:
+  score_date: "2026-03-08"
+  model_version: "phase3_2026-03-08_x_learner"
 
 # Reproducibility control
 general:

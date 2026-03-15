@@ -1,6 +1,6 @@
 # Tests
 
-Fast, deterministic `pytest` unit tests for core uplift utilities (mainly `src/uplift.py`).
+Fast, deterministic `pytest` unit tests for core uplift utilities and Phase 3 export contracts (mainly `src/uplift.py` and a small `src/business.py` helper).
 
 这里的测试专注于“工程合同 + 高风险不变量”：用合成数据 + `monkeypatch` 把训练过程替换成确定性组件，从而在重构时快速发现排序方向、权重公式、输入校验、以及副作用等回归。
 
@@ -21,6 +21,9 @@ python -m pytest -q
 
 # Run uplift tests only
 python -m pytest -q tests/test_uplift.py
+
+# Run business export contract tests only
+python -m pytest -q tests/test_business.py
 
 # Run a single test class (pattern)
 python -m pytest -q tests/test_uplift.py -k "TestXLearnerBasicFunctionality"
@@ -49,6 +52,13 @@ python -m pytest -q tests/test_uplift.py -k "TestImmutability"
 | `TestQiniBasicFunctionality` | `compute_qini` returns required keys; `qini_x/qini_y/random_y` lengths (`n_bins=20 -> 21`); boundary points (`x` starts at 0 and ends at 1; curves start at 0); random `cate` has near-zero mean `qini_coefficient` (Monte Carlo); oracle ranking beats random and reversed ranking; endpoint convergence `qini_y[-1] == random_y[-1]` | Qini 几何/语义合同：输出结构与边界点正确；随机排序接近 0；oracle 排序优于随机/反向；端点与随机基线收敛 |
 | `TestInputValidation` | learners/metrics wrap validation errors as `RuntimeError` with stable, matchable messages; `None` inputs; empty `X`; non-binary `T`; length mismatch; `NaN` in `X` | 输入校验门禁：统一 `RuntimeError` 前缀便于上层捕获；覆盖 None/空数据/非二元 treatment/长度不齐/NaN |
 | `TestImmutability` | `fit_s_learner/fit_t_learner/fit_x_learner` do not mutate `X/T/Y/ps` in-place; S-learner does not leave `__treatment_feature__` in `X` | 无副作用合同：不原地修改输入；S-learner 不残留临时列；防 in-place PS clip 这种隐蔽脏写 |
+
+`tests/test_business.py` (data-free, deterministic)
+
+| Test class / helper | What is asserted (only what the tests actually check) | 中文要点 |
+|---|---|---|
+| `_make_segments_df` | small synthetic `segments_df` fixture with canonical Phase 3 columns plus one extra debug column | 最小用户级分群夹具；覆盖 `cate`, `baseline_prob`, `segment` 和额外临时列 |
+| `TestPrepareUserSegmentsExport` | `prepare_user_segments_export` adds stable export metadata (`customer_id`, `score_date`, `model_version`, `uplift_score`), preserves row order, and rejects missing columns / bad probabilities / unknown labels / `_warning`-tagged frames | Phase 3 导出合同：补齐最小 handoff 字段，同时拦截缺列、坏概率、未知标签或带 warning 的“降级分群表” |
 
 ## Shared Contracts
 
