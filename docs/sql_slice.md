@@ -2,9 +2,9 @@
 
 ## Overview
 
-**用途：** 把“SQL + 指标口径 + 可落地动作”明确写清楚。可将其视为一份 **“继续 / 停止投放”决策手册**：每一步都回答“当前是否可以继续投放？如果不能，优先修什么？”。
+**用途：** 把“SQL + 指标口径 + demo 查询动作”明确写清楚。它是主线分析之外的一个 **local SQL appendix / handoff demo**，用于展示 uplift score 如何被 SQL 消费，而不是生产投放 SOP。
 
-**环境：** PostgreSQL 14+（SQL 使用 `{{cost_per_contact}}` 这类模板参数；执行前需要替换为带类型的 SQL 字面量；生产环境优先使用绑定参数或预处理语句。）
+**环境：** PostgreSQL 14+ 风格 SQL（SQL 使用 `{{cost_per_contact}}` 这类模板参数；本仓库主要通过 DuckDB 做本地演示与语法/口径校验。）
 
 **以此为准：** `sql/sql_slice/*.sql`
 
@@ -17,22 +17,22 @@
 
 ## 30s TL;DR
 
-- **业务问题：** 在固定触达成本下，如何把“全量投放”切换为“增量最优的精准投放”，并产出可审计的投放名单。
-- **粒度优先（口径约定）：** 每行代表 1 位客户（生产环境使用稳定 `customer_id`；本仓库 demo 中，CSV 不含 `customer_id`，DuckDB 仅用 `row_number()` 按扫描顺序生成代理键，仅供本地演示）。
+- **业务问题：** 主线 Phase 3 已选定 `Persuadables only` 作为默认离线策略；这里额外演示如果未来业务需要继续按 score 扩量，候选名单、分桶和预算查询在 SQL 中会长什么样。
+- **粒度优先（口径约定）：** 每行代表 1 位客户（若迁移到真实环境，应使用业务侧稳定 `customer_id`；本仓库当前导出的 `user_segments.csv` 默认包含 repo-local surrogate `customer_id`，只保证与 `hillstrom_features.csv` 在本地复现链路中对齐；仅在兼容旧 CSV 时，DuckDB 才回退到 `row_number()` 代理键）。
 - **指标口径（约定）：**
   - `conversion`: 0/1
   - `spend`: numeric = 用户在观测窗内的消费金额（在收入结果型 SQL 中常别名为 `customer_revenue`；**不是营销成本**；营销成本只来自 `cost_per_contact`）
   - `uplift_score`: 表示转化概率层面的 CATE 估计值（单位 = 概率点）
   - `ROI_conv_per_cost = SUM(uplift_score) / (n_targeted * cost_per_contact)`
 - **关键门禁：**
-  - **数据质量门禁（DQ gate）：** 一旦出现主键重复 / 空主键 / 连接扇出（join fanout）-> 立刻停止后续 ROI 分析与结论输出，先修数据合约
+  - **数据质量门禁（DQ gate）：** 一旦出现主键重复 / 空主键 / 连接扇出（join fanout）-> 停止继续解读 demo ROI / 名单结果，先修数据合约
   - **平衡性门禁（Balance gate）：** `abs(SMD) < 0.10`（否则优先怀疑过滤偏差，并视情况调整或限制结论）
-  - **投放门禁（Targeting gate）：** 只有 Q0 通过后才允许进行后续输出；默认只投 `uplift_score > 0`，预算内优先覆盖 `uplift_score > 0` 的 top-K，最终价值仍需由线上 A/B 完成验证闭环
-- **推荐执行顺序：** `Q0 -> Q1 -> Q2 -> Q4 -> Q6 -> Q7 -> (Q8) -> Q9`
+  - **Targeting gate：** Q0 通过后，主线默认建议仍是 `Persuadables only`；若进入 SQL appendix 的 downstream expansion demo，再看 `uplift_score > 0` 的 top-K / cutoff / 预算建议，最终价值仍需由线上 A/B 完成验证闭环
+- **推荐执行顺序：** `Q0 -> Q1 -> Q2 -> Q4 -> Q6`；`Q7/Q8/Q9` 仅在需要 SQL demo 或未来扩量分析时再执行
 
 ---
 
-## Data Contract
+## Demo Data Contract
 
 ### Table A: experiment feature table
 
@@ -40,7 +40,7 @@
 
 **最小字段要求：**
 
-- `customer_id`（Primary Key；生产环境稳定主键）
+- `customer_id`（本仓库 local demo 使用的 join key；当前为 repo-local surrogate key，不等同业务侧稳定主键）
 - `treatment`（0/1 实验分组）
 - `conversion`（0/1 是否转化）
 - `spend`（numeric outcome；表示观测窗内的消费金额，在部分收入结果型 SQL 中会别名为 `customer_revenue`；不是营销成本）
@@ -52,19 +52,19 @@
 **最小字段要求：**
 
 - `customer_id`
-- `score_date`（date：表示该次打分结果对应的业务日期；同一用户在不同日期/不同模型版本下可能有出现多条记录,这是合理的）
-- `model_version`（text）
+- `score_date`（date：本仓库 demo 中用于标记当前 score run 的本地批次日期）
+- `model_version`（text：本仓库 demo 中用于标记当前 score run 的本地版本标签）
 - `uplift_score`（numeric；表示 `conversion` 结果上的 CATE 估计值）
 
-**唯一性要求（必须）：** 上游必须保证 `(customer_id, score_date, model_version)` 唯一。若存在重复，应视为数据异常（除 demo 的鲁棒性演示外，不应依赖“通过求均值掩盖重复记录”的伪处理方式）。
+**唯一性要求（必须）：** 在本仓库 demo 合约下，`(customer_id, score_date, model_version)` 必须唯一。若存在重复，应视为数据异常；这用于保证本地 SQL slice 的 join / bucket / 名单查询不发生静默放大。
 
-**仓库映射：** CATE 向量文件保存在 `data/processed/cate_vectors.npz`（常见 key：`cate_x/cate_s/cate_t`）。面向 SQL 的输出 `data/processed/user_segments.csv` 用 `cate` 列承载“最终选用的 CATE”（默认选择 X-Learner 的 `cate_x`）。
+**仓库映射：** CATE 向量文件保存在 `data/processed/cate_vectors.npz`（常见 key：`cate_x/cate_s/cate_t`，并额外保存与 `hillstrom_features.csv` 对齐的 `customer_id`）；`data/processed/qini_results.json` 保存 held-out Qini 评估与 `best_learner` 元数据。`notebooks/05_segmentation_and_roi.ipynb` 会据此生成 `data/processed/user_segments.csv`；该文件包含 `customer_id`, `score_date`, `model_version`, `uplift_score` 这些 demo handoff 字段，同时保留 `cate` 作为同义列。`uplift_score` / `cate` 保存的是 `qini_results.json.meta.best_learner` 对应的全样本 CATE 向量；按当前持久化产物，该 learner 为 X-Learner，因此本次文件中它们与 `cate_x` 对齐。这里的 `customer_id` 只用于仓库内本地复现与 SQL demo；若迁移到真实环境，应替换为业务侧稳定主键。
 
 ---
 
 ## Metric Dictionary
 
-**时间窗口（生产合约）：** `conversion` / `spend` 必须在同一个处理后观测窗口内度量，例如 `[assignment_ts, assignment_ts + 14 days)`。
+**时间窗口（若迁移到真实环境）：** `conversion` / `spend` 应在同一个处理后观测窗口内度量，例如 `[assignment_ts, assignment_ts + 14 days)`。
 
 **本仓库：** Hillstrom 数据集已经提供固定观测窗下的 `conversion` / `spend` 结果，直接视为冻结口径。
 
@@ -90,18 +90,18 @@
 
 ## Decision Map
 
-下表用于快速把指标结论对应到下一步动作。它描述的是默认主链；Q3 / Q5 属于支撑分析，Q8 属于预算辅助，见下方索引与 Pattern Cards。
+下表用于快速把指标结论对应到下一步动作。它描述的是 SQL appendix 中的 demo / extension flow，而不是主线 Phase 3 已选定的 targeting policy；Q3 / Q5 属于支撑分析，Q7 / Q8 / Q9 只在需要扩量 demo 时再看。
 
 | 步骤 | 读取内容 | 默认动作 | SQL 文件 |
 |---|---|---|---|
-| DQ gate（数据质量门禁） | PK 唯一性 / 空主键 / join 约束 | **停投**：若发生异常,先处理好数据再进行下一步 | [`00a_key_grain_qa_hillstrom_features.sql`](../sql/sql_slice/00a_key_grain_qa_hillstrom_features.sql), [`00b_key_grain_qa_uplift_scores.sql`](../sql/sql_slice/00b_key_grain_qa_uplift_scores.sql), [`00c_key_grain_qa_scores_to_features_join_coverage.sql`](../sql/sql_slice/00c_key_grain_qa_scores_to_features_join_coverage.sql) |
+| DQ gate（数据质量门禁） | PK 唯一性 / 空主键 / join 约束 | **停止继续解读 demo 结果**：若发生异常,先处理好数据再进行下一步 | [`00a_key_grain_qa_hillstrom_features.sql`](../sql/sql_slice/00a_key_grain_qa_hillstrom_features.sql), [`00b_key_grain_qa_uplift_scores.sql`](../sql/sql_slice/00b_key_grain_qa_uplift_scores.sql), [`00c_key_grain_qa_scores_to_features_join_coverage.sql`](../sql/sql_slice/00c_key_grain_qa_scores_to_features_join_coverage.sql) |
 | Experiment sanity by arm | `arm_share_rows` / `arm_share_distinct` / `conversion_rate` / `avg_customer_revenue_per_user` 是否异常 | 若异常则回查数据接入、过滤条件与指标口径；通过后才继续 | [`01_experiment_sanity_by_arm.sql`](../sql/sql_slice/01_experiment_sanity_by_arm.sql) |
 | Naive ATE + CI + ROI sanity | ATE + CI, `roi_conv_per_cost` | CI 跨 0 -> 不进行下一步，只保留实验观察；CI 为正 -> 进入策略层 | [`02_naive_ate_roi_ci.sql`](../sql/sql_slice/02_naive_ate_roi_ci.sql) |
 | Balance gate（平衡性门禁） | `abs_smd` / `null_rate_diff` | `abs(SMD) >= 0.10` -> 降级结论并排查过滤偏差；通过后才允许解释异质性与策略 | [`04_balance_smd_missingness.sql`](../sql/sql_slice/04_balance_smd_missingness.sql) |
-| Score-run health snapshot | `pct_scored` / score quantiles / 按 `score_date` 对比历史分布 | 若当前批次与历史分布明显偏离 -> 回滚 `model_version` 并排查打分流程 | [`06_score_run_health_drift.sql`](../sql/sql_slice/06_score_run_health_drift.sql) |
-| Bucket curve | bucket curve + cumulative ROI | 累计 ROI 达峰值或边际转负 -> 停止扩量 | [`07_bucket_curve_expected_vs_observed_roi.sql`](../sql/sql_slice/07_bucket_curve_expected_vs_observed_roi.sql) |
-| Budget allocation helper | 预算上限内的 `uplift_score > 0` top-K | 在预算上限下给出建议 topK / cutoff（当前 SQL 未实现 ROI floor 过滤） | [`08_cutoff_solver_budget_argmax_expected_roi.sql`](../sql/sql_slice/08_cutoff_solver_budget_argmax_expected_roi.sql) |
-| Activation list + rollup | top-K 名单 + 单行汇总 | 导出名单，但必须上线 A/B 收口；打分批次健康需先由 Q6 确认，不能把离线分数当真值 | [`09a_activation_list_topk.sql`](../sql/sql_slice/09a_activation_list_topk.sql), [`09b_activation_expected_roi_rollup.sql`](../sql/sql_slice/09b_activation_expected_roi_rollup.sql) |
+| Score-run health snapshot | `pct_scored` / score quantiles / 按 `score_date` 对比历史分布 | 若当前批次与历史分布明显偏离 -> 排查当前本地打分产物与元数据 | [`06_score_run_health_drift.sql`](../sql/sql_slice/06_score_run_health_drift.sql) |
+| Bucket curve | bucket curve + cumulative ROI | 作为补充上界分析观察“若未来继续扩量，边际回报何时开始变差”；不改变主线 `Persuadables only` 策略 | [`07_bucket_curve_expected_vs_observed_roi.sql`](../sql/sql_slice/07_bucket_curve_expected_vs_observed_roi.sql) |
+| Budget allocation helper | 预算上限内的 `uplift_score > 0` top-K | 若未来做 score-based 扩量，可在预算上限下演示 top-K / cutoff 建议（当前 SQL 未实现 ROI floor 过滤） | [`08_cutoff_solver_budget_argmax_expected_roi.sql`](../sql/sql_slice/08_cutoff_solver_budget_argmax_expected_roi.sql) |
+| Activation list + rollup | top-K 候选名单 + 单行汇总 | 导出 downstream extension demo 候选名单；若未来用于真实触达，仍必须通过线上 A/B 收口，不能把离线分数当真值 | [`09a_activation_list_topk.sql`](../sql/sql_slice/09a_activation_list_topk.sql), [`09b_activation_expected_roi_rollup.sql`](../sql/sql_slice/09b_activation_expected_roi_rollup.sql) |
 
 ---
 
@@ -118,9 +118,9 @@
 | Q4 | Balance diagnostic | 主门禁：平衡性 / 泄漏排查 | `04` |
 | Q5 | Heterogeneity template | 支撑分析：异质性探索 | `05` |
 | Q6 | Score-run health snapshot | 主链：打分批次健康检查 | `06` |
-| Q7 | Bucket curve | 主链：cutoff / 放量决策 | `07` |
-| Q8 | Budget allocation helper | 策略辅助：预算内 K / cutoff 建议 | `08` |
-| Q9 | Activation list + rollup | 主链终点：投放名单导出 | `09a`, `09b` |
+| Q7 | Bucket curve | appendix：扩量上界 / sensitivity 分析 | `07` |
+| Q8 | Budget allocation helper | appendix：预算内 K / cutoff demo | `08` |
+| Q9 | Activation list + rollup | appendix：候选名单 demo 导出 | `09a`, `09b` |
 
 文件缩写说明（供上表快速查找）：
 
@@ -150,9 +150,9 @@
 
 - 输入：`analytics.hillstrom_features`, `analytics.uplift_scores`
 - 输出结构：key / NULL / duplicate 统计 + `join_contract_ok`
-- 判定规则：只要出现主键重复 / 空主键 / `join_contract_ok = false`，就立即停投
+- 判定规则：只要出现主键重复 / 空主键 / `join_contract_ok = false`，就立即停止继续解读名单 / ROI demo
 - 下一步动作：修 PK、去重规则和 join 约束；通过前不解读 ROI / cutoff / 投放结果
-- 注意：demo 中临时生成的代理 `customer_id` 只用于本地校验，生产环境必须使用稳定主键
+- 注意：repo-local surrogate `customer_id` 只用于本地校验与 demo join；若迁移到真实环境，必须替换为稳定业务主键
 
 </details>
 
@@ -216,42 +216,42 @@
 
 - 输入：`analytics.uplift_scores`, `model_version`
 - 输出结构：`pct_scored`, `pct_positive_*`, `mean_score`, `p50_score`, `p90_score`, `p99_score`, `min_score`, `max_score`
-- 判定规则：coverage 下滑或与历史相比 quantile 分布明显漂移 -> 回滚 `model_version` 或排查打分流程（当前 SQL 负责输出快照，drift 需人工对比）
+- 判定规则：coverage 下滑或与历史相比 quantile 分布明显偏离 -> 排查当前本地打分产物与元数据（当前 SQL 负责输出快照，drift 需人工对比）
 - 下一步动作：只有当前打分批次健康且与历史对比无明显异常后，才继续看 Q7 / Q8 / Q9
-- 注意：这里的 dedup 仅用于监控，不能直接用于生产投放查询
+- 注意：这里的 dedup 仅用于监控，不能直接当作真实触达查询的兜底逻辑
 
 </details>
 
 <details>
-<summary><strong>Q7 — Bucket curve</strong> · cutoff / 放量决策 · <code>07</code></summary>
+<summary><strong>Q7 — Bucket curve</strong> · optional upper-bound / expansion analysis · <code>07</code></summary>
 
 - 输入：`analytics.uplift_scores`, `analytics.hillstrom_features`, `score_date`, `model_version`, `n_buckets`, `min_cell_n`, `cost_per_contact`
 - 输出结构：bucket 级别的 `expected_roi_conv_per_cost_marginal`, `observed_roi_conv_per_cost_marginal`, `cum_expected_roi_conv_per_cost`, `cum_observed_roi_conv_per_cost`
-- 判定规则：累计 ROI 见顶或边际 ROI 转负 -> 停止扩量；小样本 bucket 仅供参考
-- 下一步动作：把峰值 bucket 作为放量区间参考；如需建议 K / cutoff，转到 Q8；Q9 仍按 `budget_n_users` 导出名单
+- 判定规则：把累计 / 边际 ROI 变化当作未来扩量的上界参考；小样本 bucket 仅供参考
+- 下一步动作：把峰值 bucket 作为未来放量区间参考；如需建议 K / cutoff，转到 Q8；这不改变主线 `Persuadables only` 策略
 - 注意：前提是 Q0 已通过；若存在 score 表重复行 / 特征表关联放大，Q7 会返回空结果，不再靠静默取平均来兜底
 
 </details>
 
 <details>
-<summary><strong>Q8 — Budget allocation helper</strong> · 预算内推荐 K · <code>08</code></summary>
+<summary><strong>Q8 — Budget allocation helper</strong> · optional budgeted top-K demo · <code>08</code></summary>
 
 - 输入：`analytics.uplift_scores`, `analytics.hillstrom_features`, `score_date`, `model_version`, `budget_n_users`, `cost_per_contact`
 - 输出结构：`recommended_n_users`, `cutoff_uplift_score`, `expected_incremental_conversions`, `total_cost`, `expected_roi_conv_per_cost`, `budget_utilization`
 - 判定规则：默认目标是“预算内最大化 expected incremental conversions”，不是追求最小 K 下的最高 ROI 比值
-- 下一步动作：用建议 K 驱动 Q9 名单导出，再用线上留出组 / A/B 完成验证闭环
+- 下一步动作：若未来决定从 `Persuadables only` 向外扩量，可用建议 K 驱动 Q9 demo 名单导出，再用线上留出组 / A/B 完成验证闭环
 - 注意：前提是 Q0 已通过；这是预算分配辅助查询，不声称给出全局最优解，且当前 SQL 未实现 ROI floor 过滤
 
 </details>
 
 <details>
-<summary><strong>Q9 — Activation list + rollup</strong> · 可交付投放名单 · <code>09a</code> <code>09b</code></summary>
+<summary><strong>Q9 — Activation list + rollup</strong> · downstream extension demo · <code>09a</code> <code>09b</code></summary>
 
 - 输入：`analytics.uplift_scores`, `analytics.hillstrom_features`, `score_date`, `model_version`, `budget_n_users`, `cost_per_contact`
-- 输出结构：投放名单（`customer_id`, `rank`, `score_date`, `model_version`, 补充字段）+ 单行 ROI 汇总
-- 判定规则：只导出 `uplift_score > 0` 的 top-K；Q0 未过时名单为空；score-run 健康需先由 Q6 人工确认，Q9 本身不做该校验
-- 下一步动作：上线触达时，必须保留留出组 / A/B 验证
-- 注意：投放名单是给运营执行的名单，不是离线“真值标签”
+- 输出结构：候选名单（`customer_id`, `rank`, `score_date`, `model_version`, 补充字段）+ 单行 ROI 汇总
+- 判定规则：若执行 SQL appendix 的扩量 demo，则只导出 `uplift_score > 0` 的 top-K；Q0 未过时名单为空；score-run 健康需先由 Q6 人工确认，Q9 本身不做该校验
+- 下一步动作：若未来把这类查询迁移到真实触达场景，必须保留留出组 / A/B 验证
+- 注意：这里导出的只是 repo-local 候选名单 demo，不是已经接入投放系统的生产 activation feed
 
 </details>
 
@@ -482,7 +482,7 @@ ORDER BY w.bucket;
 - **时间窗对齐（time window alignment）**：`conversion` / `spend`（在部分收入报表中常别名为 `customer_revenue`）必须落在同一观测窗；时区错配可能引发难以及时察觉的数据错误。
 - **多重比较（multiplicity）**：子群切得越细，越容易“看见并不存在的 uplift”；应设置 `min_cell_n`，默认只作探索性参考。
 
-推荐的生产索引（Postgres）：
+若未来迁移到真实环境，可参考以下典型索引（Postgres）：
 
 - `hillstrom_features(customer_id)` unique
 - `uplift_scores(score_date, model_version, customer_id)` unique

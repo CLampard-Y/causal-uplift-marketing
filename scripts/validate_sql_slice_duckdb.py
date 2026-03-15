@@ -11,6 +11,7 @@ Postgres + COPY/DDL scaffolding.
 
 from __future__ import annotations
 
+import csv
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,29 +56,66 @@ def main() -> int:
     sql_files = sorted(sql_dir.glob("*.sql"))
     print(f"found_sql_files={len(sql_files)}")
 
+    features_path = Path("data/processed/hillstrom_features.csv")
+    with features_path.open("r", encoding="utf-8", newline="") as f:
+        feature_fieldnames = csv.DictReader(f).fieldnames or []
+
+    user_segments_path = Path("data/processed/user_segments.csv")
+    with user_segments_path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or []
+        first_data_row = next(reader, None)
+        score_runs = {
+            (str(row.get("score_date", "")).strip(), str(row.get("model_version", "")).strip())
+            for row in reader
+        } if {"score_date", "model_version"}.issubset(fieldnames) else set()
+
+    if first_data_row is None:
+        raise ValueError("user_segments.csv must contain at least one data row")
+
+    score_date_value = str(first_data_row.get("score_date", "")).strip() if "score_date" in fieldnames else "2026-03-05"
+    if "score_date" in fieldnames and not score_date_value:
+        raise ValueError("user_segments.csv contains blank score_date in first data row")
+
+    model_version_value = str(first_data_row.get("model_version", "")).strip() if "model_version" in fieldnames else "demo"
+    if "model_version" in fieldnames and not model_version_value:
+        raise ValueError("user_segments.csv contains blank model_version in first data row")
+    if score_runs:
+        score_runs.add((score_date_value, model_version_value))
+        if len(score_runs) != 1:
+            raise ValueError(f"user_segments.csv must contain exactly one score run, found: {sorted(score_runs)}")
+
+    customer_id_expr = "customer_id" if "customer_id" in fieldnames else "row_number() OVER ()"
+    feature_customer_id_expr = "customer_id" if "customer_id" in feature_fieldnames else "row_number() OVER ()"
+    score_date_expr = "CAST(score_date AS DATE)" if "score_date" in fieldnames else f"DATE '{score_date_value}'"
+    model_version_expr = "model_version" if "model_version" in fieldnames else f"'{model_version_value}'"
+    uplift_score_expr = "CAST(uplift_score AS DOUBLE)" if "uplift_score" in fieldnames else "cate::DOUBLE"
+
     con = duckdb.connect(database=":memory:")
     con.execute("CREATE SCHEMA IF NOT EXISTS analytics")
 
     # Demo mapping:
-    # - hillstrom_features.csv has no customer_id; generate surrogate key.
-    # - user_segments.csv also has no customer_id; assume row order aligns.
+    # - user_segments.csv prefers explicit customer_id/score metadata when available;
+    #   otherwise fall back to the historical row-order demo contract.
+    # - hillstrom_features.csv prefers explicit customer_id when available; otherwise
+    #   we fall back to row_number() for backward-compatible local demos.
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW analytics.hillstrom_features AS
         SELECT
-          row_number() OVER () AS customer_id,
+          {feature_customer_id_expr} AS customer_id,
           *
         FROM read_csv_auto('data/processed/hillstrom_features.csv', header=true)
         """
     )
     con.execute(
-        """
+        f"""
         CREATE OR REPLACE VIEW analytics.uplift_scores AS
         SELECT
-          row_number() OVER () AS customer_id,
-          DATE '2026-03-05' AS score_date,
-          'demo' AS model_version,
-          cate::DOUBLE AS uplift_score
+          {customer_id_expr} AS customer_id,
+          {score_date_expr} AS score_date,
+          {model_version_expr} AS model_version,
+          {uplift_score_expr} AS uplift_score
         FROM read_csv_auto('data/processed/user_segments.csv', header=true)
         """
     )
@@ -85,8 +123,8 @@ def main() -> int:
     params = {
         "{{cost_per_contact}}": "1.0",
         "{{min_cell_n}}": "200",
-        "{{score_date}}": "DATE '2026-03-05'",
-        "{{model_version}}": "'demo'",
+        "{{score_date}}": f"DATE '{score_date_value}'",
+        "{{model_version}}": f"'{model_version_value}'",
         "{{n_buckets}}": "10",
         "{{budget_n_users}}": "5000",
     }
@@ -107,6 +145,9 @@ def main() -> int:
         try:
             cur = con.execute(sql)
             first_row = cur.fetchone()
+            if first_row is None:
+                results.append(BlockResult(name=p.name, ok=False, error="Query returned no rows"))
+                continue
             contract_error = _validate_contract_row(p.name, first_row)
             if contract_error:
                 results.append(BlockResult(name=p.name, ok=False, error=contract_error, first_row=first_row))
