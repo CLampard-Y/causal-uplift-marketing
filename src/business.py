@@ -401,6 +401,209 @@ def prepare_user_segments_export(
         raise RuntimeError(f"prepare_user_segments_export failed: {exc}") from exc
 
 
+def prepare_tableau_policy_compare_export(
+    roi_results: dict,
+    *,
+    selected_policy_name: str = "Persuadables only",
+) -> pd.DataFrame:
+    """Flatten Phase 3 ROI results into a Tableau-ready 3-row policy compare table."""
+    try:
+        if not isinstance(roi_results, dict) or not roi_results:
+            raise ValueError("roi_results must be a non-empty dict")
+
+        required_keys = {"full_targeting", "random_targeting", "precision_targeting"}
+        missing_keys = required_keys - set(roi_results.keys())
+        if missing_keys:
+            raise ValueError(f"roi_results missing required key(s): {sorted(missing_keys)}")
+
+        full_targeting = roi_results["full_targeting"]
+        random_targeting = roi_results["random_targeting"]
+        precision_targeting = roi_results["precision_targeting"]
+        meta = roi_results.get("_meta", {})
+
+        if not isinstance(full_targeting, dict):
+            raise ValueError("roi_results['full_targeting'] must be a dict")
+        if not isinstance(precision_targeting, dict):
+            raise ValueError("roi_results['precision_targeting'] must be a dict")
+        if not isinstance(random_targeting, list) or len(random_targeting) == 0:
+            raise ValueError("roi_results['random_targeting'] must be a non-empty list")
+        if not isinstance(meta, dict):
+            raise ValueError("roi_results['_meta'] must be a dict when provided")
+        if not isinstance(selected_policy_name, str) or not selected_policy_name.strip():
+            raise ValueError("selected_policy_name must be a non-empty string")
+
+        full_n = int(full_targeting.get("n_targeted", 0))
+        full_incremental = float(full_targeting.get("n_incremental_conv", np.nan))
+        full_cost = float(full_targeting.get("total_cost", np.nan))
+        full_roi_reported = float(full_targeting.get("roi", np.nan))
+
+        precision_n = int(precision_targeting.get("n_targeted", 0))
+        precision_incremental = float(precision_targeting.get("n_incremental_conv", np.nan))
+        precision_cost = float(precision_targeting.get("total_cost", np.nan))
+        precision_roi_reported = float(precision_targeting.get("roi", np.nan))
+        precision_budget_saving_reported = float(precision_targeting.get("budget_saving_pct", np.nan))
+        precision_retention_reported = float(precision_targeting.get("conversion_retention_pct", np.nan))
+
+        if full_n <= 0:
+            raise ValueError("full_targeting.n_targeted must be > 0")
+        if precision_n <= 0:
+            raise ValueError("precision_targeting.n_targeted must be > 0")
+        if precision_n > full_n:
+            raise ValueError("precision_targeting.n_targeted cannot exceed full targeting")
+        if not np.isfinite(full_incremental):
+            raise ValueError("full_targeting.n_incremental_conv must be finite")
+        if not np.isfinite(full_cost) or full_cost <= 0.0:
+            raise ValueError("full_targeting.total_cost must be > 0")
+        if not np.isfinite(full_roi_reported):
+            raise ValueError("full_targeting.roi must be finite")
+        if not np.isfinite(precision_incremental):
+            raise ValueError("precision_targeting.n_incremental_conv must be finite")
+        if not np.isfinite(precision_cost) or precision_cost <= 0.0:
+            raise ValueError("precision_targeting.total_cost must be > 0")
+        if not np.isfinite(precision_roi_reported):
+            raise ValueError("precision_targeting.roi must be finite")
+        if not np.isfinite(precision_budget_saving_reported):
+            raise ValueError("precision_targeting.budget_saving_pct must be finite")
+        if not np.isfinite(precision_retention_reported):
+            raise ValueError("precision_targeting.conversion_retention_pct must be finite")
+
+        full_roi = float(full_incremental / full_cost)
+        if abs(full_roi - full_roi_reported) > 1e-12:
+            raise ValueError("full_targeting.roi inconsistent with n_incremental_conv / total_cost")
+        if full_incremental <= 0.0:
+            raise ValueError("full_targeting.n_incremental_conv must be > 0 for policy compare export")
+        if full_roi <= 0.0:
+            raise ValueError("full_targeting.roi must be > 0 for policy compare export")
+
+        precision_roi = float(precision_incremental / precision_cost)
+        if abs(precision_roi - precision_roi_reported) > 1e-12:
+            raise ValueError("precision_targeting.roi inconsistent with n_incremental_conv / total_cost")
+
+        selected_budget = float(precision_n) / float(full_n)
+        if (not np.isfinite(selected_budget)) or (selected_budget <= 0.0) or (selected_budget > 1.0):
+            raise ValueError("selected budget must be in (0, 1]")
+
+        cost_per_contact = float(full_cost / full_n)
+        if (not np.isfinite(cost_per_contact)) or (cost_per_contact <= 0.0):
+            raise ValueError("derived cost_per_contact must be > 0")
+
+        precision_budget_saving = float((1.0 - selected_budget) * 100.0)
+        if abs(precision_budget_saving - precision_budget_saving_reported) > 1e-9:
+            raise ValueError("precision_targeting.budget_saving_pct inconsistent with selected budget")
+
+        precision_retention = (
+            float((precision_incremental / full_incremental) * 100.0)
+            if abs(full_incremental) > 1e-12
+            else float("nan")
+        )
+        if np.isfinite(precision_retention) and abs(precision_retention - precision_retention_reported) > 1e-9:
+            raise ValueError(
+                "precision_targeting.conversion_retention_pct inconsistent with incremental conversions"
+            )
+
+        random_exact = None
+        for row in random_targeting:
+            if not isinstance(row, dict):
+                raise ValueError("random_targeting rows must be dicts")
+            budget_pct = float(row.get("budget_pct", np.nan))
+            if not np.isfinite(budget_pct):
+                raise ValueError("random_targeting rows must contain finite budget_pct values")
+            if abs(budget_pct - selected_budget) <= 1e-12:
+                random_exact = row
+                break
+
+        if random_exact is not None:
+            random_n = int(random_exact.get("n_targeted", 0))
+            random_incremental = float(random_exact.get("n_incremental_conv", np.nan))
+            random_roi_reported = float(random_exact.get("roi", np.nan))
+            random_cost = float(random_n * cost_per_contact)
+            random_roi = float(random_incremental / random_cost) if random_cost > 0 else 0.0
+            if not np.isfinite(random_roi_reported):
+                raise ValueError("random comparator roi must be finite")
+            if abs(random_roi - random_roi_reported) > 1e-12:
+                raise ValueError("random comparator roi inconsistent with n_incremental_conv / derived cost")
+        else:
+            ate_from_cate = float(meta.get("ate_from_cate", full_incremental / full_n))
+            if not np.isfinite(ate_from_cate):
+                raise ValueError("roi_results['_meta']['ate_from_cate'] must be finite")
+            random_n = precision_n
+            random_incremental = float(ate_from_cate * random_n)
+            random_cost = float(random_n * cost_per_contact)
+            random_roi = float(random_incremental / random_cost) if random_cost > 0 else 0.0
+
+        if random_n <= 0:
+            raise ValueError("random comparator n_targeted must be > 0")
+        if not np.isfinite(random_incremental):
+            raise ValueError("random comparator incremental conversion must be finite")
+        if not np.isfinite(random_roi):
+            raise ValueError("random comparator roi must be finite")
+        if abs((random_n / full_n) - selected_budget) > 1e-12:
+            raise ValueError("random comparator n_targeted does not match selected budget")
+
+        random_budget_saving = float((1.0 - (random_n / full_n)) * 100.0)
+        random_retention = float((random_incremental / full_incremental) * 100.0) if abs(full_incremental) > 1e-12 else float("nan")
+        full_retention = 100.0 if abs(full_incremental) > 1e-12 else float("nan")
+        random_ratio_vs_full = float(random_roi / full_roi) if abs(full_roi) > 1e-12 else float("nan")
+        precision_ratio_vs_full = float(precision_roi / full_roi) if abs(full_roi) > 1e-12 else float("nan")
+
+        export_df = pd.DataFrame(
+            [
+                {
+                    "policy_name": "Full Targeting",
+                    "policy_role": "reference_full",
+                    "budget_pct": 1.0,
+                    "n_targeted": full_n,
+                    "incremental_conversion_proxy": full_incremental,
+                    "roi_proxy": full_roi,
+                    "budget_saving_pct": 0.0,
+                    "conversion_retention_pct": full_retention,
+                    "roi_proxy_ratio_vs_full": 1.0 if abs(full_roi) > 1e-12 else float("nan"),
+                    "selected_policy": False,
+                    "derived_baseline": False,
+                    "display_order": 1,
+                },
+                {
+                    "policy_name": f"Random Targeting ({selected_budget:.0%} budget comparator)",
+                    "policy_role": "derived_baseline",
+                    "budget_pct": selected_budget,
+                    "n_targeted": random_n,
+                    "incremental_conversion_proxy": random_incremental,
+                    "roi_proxy": random_roi,
+                    "budget_saving_pct": random_budget_saving,
+                    "conversion_retention_pct": random_retention,
+                    "roi_proxy_ratio_vs_full": random_ratio_vs_full,
+                    "selected_policy": False,
+                    "derived_baseline": True,
+                    "display_order": 2,
+                },
+                {
+                    "policy_name": selected_policy_name.strip(),
+                    "policy_role": "selected_policy",
+                    "budget_pct": selected_budget,
+                    "n_targeted": precision_n,
+                    "incremental_conversion_proxy": precision_incremental,
+                    "roi_proxy": precision_roi,
+                    "budget_saving_pct": precision_budget_saving,
+                    "conversion_retention_pct": precision_retention,
+                    "roi_proxy_ratio_vs_full": precision_ratio_vs_full,
+                    "selected_policy": True,
+                    "derived_baseline": False,
+                    "display_order": 3,
+                },
+            ]
+        )
+
+        if list(export_df["display_order"]) != [1, 2, 3]:
+            raise ValueError("policy compare export display_order must be [1, 2, 3]")
+
+        return export_df
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"prepare_tableau_policy_compare_export failed: {exc}") from exc
+
+
 def simulate_roi(
     segments_df: pd.DataFrame,
     Y: pd.Series,
@@ -537,6 +740,8 @@ def simulate_roi(
         #   - ATE × N: 总体平均效应，可能因模型校准误差与 sum(CATE) 不完全一致
         #   - 使用 CATE-sum 确保与 budget_sweep（也基于 CATE 排序）的内部一致性
         full_incremental = float(cate_arr.sum())
+        if full_incremental <= 0.0:
+            raise ValueError("Full targeting incremental uplift must be > 0")
 
         # ATE compute from CATE
         ate_from_cate = float(full_incremental / float(n))
