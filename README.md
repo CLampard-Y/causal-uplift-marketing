@@ -1,664 +1,188 @@
 # Causal Uplift Marketing Analysis
 
-> **因果推断与 Uplift Modeling 营销分析项目**
+> Causal inference, uplift modeling, and ROI-oriented targeting on the Hillstrom email marketing RCT.
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 
----
-
-## Executive Summary
-
-**业务问题**: 传统 A/B 测试只能回答"营销活动整体是否有效"，但无法识别哪些用户真正因营销而转化，导致预算浪费。
-
-**解决方案**: 基于 Hillstrom RCT 数据（64,000 用户），通过 **Propensity Score Matching** 消除选择偏差，使用 **X-Learner Meta-Learner** 估计个体级 CATE（Conditional Average Treatment Effect），实现四象限用户分层（Persuadables / Sure Things / Lost Causes / Sleeping Dogs）。
+Quick navigation: [Start Here](#start-here) · [Key Results](#key-results) · [Decision Snapshot](#decision-snapshot) · [Documentation Map](#documentation-map) · [Quickstart](#quickstart) · [Limitations](#limitations)
 
-**核心成果**: 精准投放相比全量投放节省 **75% 预算**（64,000 → 16,000 用户），ROI 提升 **2.08×**（0.008893 vs 0.004285），同时保留 **51.9%** 的增量转化效果。
+## Overview
 
-**技术亮点**:
-- **数学严谨性**: X-Learner 在 T:C = 2:1 不平衡场景下通过交叉估计和 PS 加权降低方差，Qini Coefficient = 1.72（T-Learner = -0.68）
-- **工程成熟度**: 不可变数据流 + 配置驱动架构 + Conventional Commits
-- **业务洞察**: 暴露 Simpson 悖论（分层 ATE 差异 2.4 倍），量化 Sleeping Dogs 负面效应（-0.41%）
+This repository studies not only whether a campaign works on average, but who should be targeted under a constrained budget.
 
----
+本项目聚焦一个直接营销决策问题：仅知道邮件活动“平均有效”还不够，真正影响投放效率的是“预算应该优先给谁”。
 
-## Project Overview | 项目概览
+基于 Hillstrom 的 `64,000` 用户随机对照实验数据，项目实现了一条从因果基线到策略落地的完整分析链路：
 
-本项目基于 **Hillstrom Email Marketing Dataset** (64,000 用户 RCT 实验数据)，通过因果推断与 Uplift Modeling 方法，实现从朴素 A/B 测试到精准营销 ROI 优化的完整分析流程。
+- 用 EDA 与随机化平衡检查建立可信基线
+- 用 Propensity Score Matching (PSM) 把去偏流程做成可迁移、可审计的 pipeline
+- 用 S/T/X-Learner 估计个体级 CATE（Conditional Average Treatment Effect）
+- 用 Qini/AUUC 评估 uplift 排序能力
+- 用四象限分群与 offline policy simulation 将模型输出转成 targeting 策略
+- 用 placebo / permutation falsification 为主实验补充稳健性证据；Notebook 06 会重估 PS，并通过 notebook-local shadow matcher 计算 placebo ATE，而不是直接回放 Notebook 03 的 matcher
 
-### Business Context | 业务背景
+总体转化率仅 `0.9031%`，而按渠道分层的 uplift 介于 `+0.3573%` 到 `+0.8609%` 之间。这说明平均值会掩盖具有经济意义的异质性，因此项目重点不止是证明 treatment 有效，而是把异质性翻译成可执行的 targeting 策略。
 
-传统 A/B 测试只能回答"营销活动整体是否有效"，但无法回答：
-- 哪些用户真正因为营销而转化？（Persuadables）
-- 哪些用户本来就会转化？（Sure Things）
-- 哪些用户营销反而有负面效果？（Sleeping Dogs）
+## Start Here
 
-本项目通过 **CATE (Conditional Average Treatment Effect)** 估计，实现个体级别的增量效应预测，为精准营销提供决策依据。
+Choose a reading path below based on how quickly you want to review the project.
 
-### Key Results | 核心成果（渐进式改进对比）
+- `30 sec`: 先看 [`docs/case_study_one_pager.md`](docs/case_study_one_pager.md)，这是面向业务沟通的单页入口，先快速把握问题定义、策略选择和核心离线结论
+- `2 min`: 直接打开 [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb)、[`outputs/figures/fig_06_qini_curves.png`](outputs/figures/fig_06_qini_curves.png)、[`outputs/figures/fig_08_roi_comparison.png`](outputs/figures/fig_08_roi_comparison.png)、[`outputs/figures/fig_08b_budget_uplift_curve.png`](outputs/figures/fig_08b_budget_uplift_curve.png)（optional upper-bound expansion analysis）和 [`outputs/figures/fig_09_placebo_ate.png`](outputs/figures/fig_09_placebo_ate.png)
+- `10 min`: 阅读 [`docs/Phase2_Execution_PRD.md`](docs/Phase2_Execution_PRD.md)、[`docs/Phase3_Execution_PRD.md`](docs/Phase3_Execution_PRD.md)、[`docs/Phase4_Execution_PRD.md`](docs/Phase4_Execution_PRD.md)，按“matching -> targeting -> robustness”快速看完整技术主线；如需本地 SQL demo 补充，再看 [`docs/sql_slice.md`](docs/sql_slice.md)
+- `Reproduce locally`: 按 [Quickstart](#quickstart) 复现，再结合 [`data/README.md`](data/README.md) 和 [`tests/README.md`](tests/README.md) 查看数据布局与验证边界
 
-| Stage | Method | ATE (%) | 95% CI | Sample Size | Key Insight |
-|-------|--------|---------|--------|-------------|-------------|
-| **Baseline** | Naive ATE | 0.4955 | - | 64,000 | 总体有效，但掩盖异质性（Simpson 悖论） |
-| **Phase 1** | PSM ATE | 0.4932 | [0.3156, 0.6708] | 42,612 (matched) | 验证 RCT 无偏性（ATE 几乎不变） |
-| **Phase 2** | X-Learner CATE | - | - | 64,000 | Qini Coef = 1.72（T-Learner = -0.68） |
-| **Phase 3** | Precision Targeting | - | - | 16,000 (25%) | **ROI 2.08×**, Budget -75%, Conversion Retention 51.9% |
+## Key Results
 
-**渐进式改进逻辑**:
-1. **Baseline**: 朴素 ATE 暴露效应异质性（分层 ATE 差异 2.4 倍）
-2. **Phase 1**: PSM 验证因果识别策略的正确性（RCT 数据 ATE 几乎不变）
-3. **Phase 2**: Meta-Learners 估计个体级 CATE，X-Learner 在不平衡场景下方差最优
-4. **Phase 3**: 基于 CATE 排序实现四象限分层，量化精准投放 ROI
+Verified phase metrics and offline policy estimates from repo-visible notebooks and execution reports are listed below.
 
----
+下表只保留仓库中可直接核验的核心结果，详细证据见各阶段执行报告与对应 notebook。
 
-## Table of Contents | 目录
+| Stage | Verified Result | Evidence |
+|---|---|---|
+| Baseline causal effect | 在 `64,000` 用户 RCT 上，Naive ATE = `+0.4955%` | [`Notebook 02`](notebooks/02_bias_exposure_and_naive_ate.ipynb), [`Phase 1 report`](docs/Phase1_Execution_PRD.md) |
+| PSM diagnostics | `OVL=0.9880`，overlap ratio `95.79%`，matched pairs `21,305` | [`Notebook 03`](notebooks/03_propensity_score_matching.ipynb), [`Phase 2 report`](docs/Phase2_Execution_PRD.md) |
+| PSM effect estimate | PSM ATE = `0.502%`，`95% CI [0.324%, 0.690%]` | [`Notebook 03`](notebooks/03_propensity_score_matching.ipynb), [`Phase 2 report`](docs/Phase2_Execution_PRD.md) |
+| Uplift ranking | X-Learner 的 Qini Coefficient = `1.719097`（S-Learner `1.670222`，T-Learner `-0.679497`） | [`Notebook 04`](notebooks/04_uplift_modeling.ipynb), [`Phase 2 report`](docs/Phase2_Execution_PRD.md) |
+| Targeting simulation | 以“仅触达 Persuadables”作为选定离线策略，在归一化触达成本下得到 `ROI proxy 2.08x`（`0.008893` vs `0.004285`），预计预算 `-75.0%`，预计保留 `51.9%` 增量转化；预算扫描仅作为补充扩量上界分析 | [`Notebook 05`](notebooks/05_segmentation_and_roi.ipynb), [`Phase 3 report`](docs/Phase3_Execution_PRD.md) |
+| Robustness check | Placebo test（`n_permutations=200`）得到 placebo mean `-0.000064`、std `0.000914`、`p=0.0050` | [`Notebook 06`](notebooks/06_robustness_checks.ipynb), [`Phase 4 report`](docs/Phase4_Execution_PRD.md) |
 
-- [Project Structure](#project-structure--项目结构)
-- [Environment](#environment--开发环境)
-- [Phase 1: EDA & Bias Exposure](#phase-1-eda--bias-exposure)
-- [Phase 2: PSM & Uplift Modeling](#phase-2-psm--uplift-modeling)
-- [Phase 3: Segmentation & ROI](#phase-3-segmentation--roi)
-- [Project Strengths](#project-strengths--项目优势)
-- [Technical Deep Dive](#technical-deep-dive--技术深入解析)
+## Decision Snapshot
 
----
+This repo goes beyond model comparison and supports a concrete offline targeting recommendation on the benchmark dataset.
 
-## Project Structure | 项目结构
+- `Why targeting matters`: 总体 uplift 为正，但在低基线转化率和明显异质性下，“全量触达”并不是默认最优策略
+- `Selected offline policy`: 以 Phase 2 在 held-out test split 上按 Qini 选出的 X-Learner 为选型依据，先做四象限分群，再将 `Persuadables only` 作为默认投放名单；`Sleeping Dogs` 显式排除，`Sure Things` 与 `Lost Causes` 不属于默认投放名单，仅在未来需要扩量时再单独评估
+- `Offline policy takeaway`: 在当前默认阈值下，`Persuadables` 恰好对应 `16,000` 人（`25%`）；离线模拟表明，仅触达这部分用户预计可保留 `51.9%` 的增量转化，同时将预算压缩 `75.0%`。预算曲线中“约 `60%` 预算覆盖 `>=95%` 全量 uplift”只表示连续 CATE 排序下的补充扩量上界，不代表当前选定策略
+- `Deployment boundary`: 以上均为基于 RCT 基准数据和归一化触达成本的离线结果；若迁移到观察性投放场景，仍需重新验证 overlap，并通过线上 holdout 完成闭环
 
-```
-Project3_Causal-Uplift-Marketing/
-├── configs/
-│   └── config.yml              # 集中式配置文件（路径、超参数）
-├── data/
-│   ├── raw/                    # 原始数据 + 时间戳快照（不可变）
-│   └── processed/              # 清洗后数据（ELT 输出）
-├── docs/                       # 项目规划文档（PRD）
-├── notebooks/                  # 分析 Notebooks（01-05 + DoD gate）
-│   ├── 01_data_ingestion_and_eda.ipynb
-│   ├── 02_bias_exposure_and_naive_ate.ipynb
-│   ├── 03_propensity_score_matching.ipynb
-│   ├── 04_uplift_modeling.ipynb
-│   ├── 05_segmentation_and_roi.ipynb
-│   └── Phase1_DoD.ipynb
-├── outputs/
-│   └── figures/                # 生成的可视化图表（27 张）
-├── src/
-│   ├── data_utils.py           # 数据加载与清洗（386 行）
-│   ├── causal.py               # 因果推断工具（695 行）
-│   ├── uplift.py               # Uplift Modeling（763 行）
-│   └── business.py             # 业务逻辑层（557 行）
-├── (no tests/)                 # 当前以 DoD Notebook 作为回归门禁
-├── requirements.txt            # 依赖管理
-├── setup.py                    # 包安装配置
-└── README.md                   # 项目文档
-```
+## Documentation Map
 
----
+Open these documents for phase-by-phase evidence and implementation details.
 
-## Environment | 开发环境
+- [`docs/case_study_one_pager.md`](docs/case_study_one_pager.md): 业务优先的单页入口；先看推荐策略与核心结论，再回到 phase reports 看证据
+- [`docs/Phase1_Execution_PRD.md`](docs/Phase1_Execution_PRD.md): 数据摄入、EDA、Naive ATE、HTE、RCT 平衡性检查
+- [`docs/Phase2_Execution_PRD.md`](docs/Phase2_Execution_PRD.md): PSM、overlap/positivity、matched ATE、uplift modeling、Qini 评估
+- [`docs/Phase3_Execution_PRD.md`](docs/Phase3_Execution_PRD.md): 四象限分群、`Persuadables only` 默认策略、阈值敏感性，以及作为补充扩量分析的预算曲线
+- [`docs/Phase4_Execution_PRD.md`](docs/Phase4_Execution_PRD.md): placebo / permutation falsification 与 verification boundary
+- [`tests/README.md`](tests/README.md): data-free 单元测试范围、运行入口与 Coverage Map
+- [`data/README.md`](data/README.md): 本地数据布局、常见产物与复现路径
+- [`docs/sql_slice.md`](docs/sql_slice.md): 可选的 SQL appendix / local demo runbook；在读完主线分析后，用于把已选定的 `Persuadables only` 策略，以及未来可能的 score-based top-K / cutoff 扩量 demo，翻译成可复现的本地查询
 
-本项目在以下环境下开发完成：
+## Repository Guide
 
-**Core Dependencies**:
-- Python 3.10+
-- `pandas`, `numpy`: 数据处理
-- `scikit-learn`: 机器学习（LogisticRegression, PSM）
-- `xgboost`: Uplift Modeling（Meta-Learners）
-- `matplotlib`, `seaborn`: 可视化
+Key files and directories for configuration, methods, notebooks, and outputs.
 
-**Quality Gate**:
-- 当前仓库未提交 `tests/`，主要以 `notebooks/Phase1_DoD.ipynb` 作为回归门禁（可执行验收清单）
+- [`configs/config.yml`](configs/config.yml): 单一配置入口，集中管理路径、covariates、PSM 默认参数与随机种子
+- [`src/data_utils.py`](src/data_utils.py): 数据加载、清洗、特征工程与产物落盘
+- [`src/causal.py`](src/causal.py): propensity score、matching、balance check、ATE / bootstrap 工具
+- [`src/uplift.py`](src/uplift.py): S/T/X-Learner、Qini / AUUC 评估
+- [`src/business.py`](src/business.py): 分群、ROI simulation 与预算扫描逻辑
+- [`notebooks/`](notebooks): 分阶段分析与结果输出
+- [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb): 端到端回归门禁 notebook
+- [`outputs/figures/`](outputs/figures): 各阶段已落盘图表
 
-**Note**: 所有 Notebooks 已包含完整输出结果（图表、统计量、代码执行结果），可直接在 GitHub 上浏览，无需本地运行。如需复现分析流程，请参考 `requirements.txt` 和 `setup.py`
+## Quickstart
 
----
+Run from the repository root.
 
-## Phase 1: EDA & Bias Exposure
+在仓库根目录执行以下步骤。
 
-### Objective | 目标
-建立数据质量基准，暴露朴素 ATE 的局限性，为后续因果推断铺平道路。
+### 1) Install dependencies
 
-### Key Findings | 核心发现
-
-#### 1.1 Data Quality Validation | 数据质量验证
-- **Sample Size**: 64,000 users (Treatment:Control = 2:1)
-- **Conversion Rate**: 0.90% (极端类别不平衡)
-- **Zero Spend Ratio**: 99.1% (spend 作为目标变量统计意义极低)
-- **Missing Values**: 0 (数据清洗完整性通过)
-
-**业务洞察**: 低转化率场景（rare event）对模型训练提出更高要求，需要使用 `scale_pos_weight` 处理类别不平衡。
-
-#### 1.2 Covariate Balance Check | 协变量平衡检验
-使用 **SMD (Standardized Mean Difference)** 验证 RCT 随机化质量：
-
-| Covariate | SMD | Status |
-|-----------|-----|--------|
-| history | 0.0071 | ✓ Balanced |
-| mens | 0.0066 | ✓ Balanced |
-| womens | 0.0063 | ✓ Balanced |
-| recency | 0.0060 | ✓ Balanced |
-| newbie | 0.0008 | ✓ Balanced |
-
-**技术标准**: 所有协变量 SMD < 0.1，验证了 RCT 数据的无偏性（Selection Bias ≈ 0）。
-
-#### 1.3 Naive ATE & Heterogeneity | 朴素 ATE 与效应异质性
-
-**Overall Naive ATE**:
-- Treatment Conversion Rate: 1.0681%
-- Control Conversion Rate: 0.5726%
-- **Naive ATE**: 0.4955% (相对提升 86.53%)
-
-**Stratified ATE Analysis** (暴露效应异质性):
-
-| Subgroup | ATE | 95% CI | Insight |
-|----------|-----|--------|---------|
-| **Multichannel** | 0.86% | [0.36%, 1.31%] | 最高增量效应 |
-| Web | 0.53% | [0.31%, 0.74%] | 中等效应 |
-| Phone | 0.36% | [0.15%, 0.55%] | 最低效应 |
-| **New Customer** | 0.63% | [0.45%, 0.81%] | 新用户响应更强 |
-| Existing Customer | 0.36% | [0.13%, 0.57%] | 老用户响应较弱 |
-
-**核心洞察**: 不同子群体间 ATE 差异达 **2.4 倍**（0.36% vs 0.86%），证明了 Uplift Modeling 的必要性——"一刀切"的全量投放存在巨大效率浪费。
-
-#### 1.4 Simpson's Paradox Exposure | Simpson 悖论暴露
-通过分层分析揭示：总体 ATE 掩盖了子群体间的巨大异质性。这正是 Uplift Modeling 的业务价值所在——需要个体级别的 CATE 估计来实现精准营销。
-
-### Core Visualizations | 核心可视化
-- `eda_covariate_comparison.png`: Treatment vs Control 协变量均值对比
-- `fig_01_naive_comparison.png`: 朴素 ATE 可视化
-- `fig_01b_ate_heterogeneity.png`: 分层 ATE 异质性（4 个维度）
-- `fig_01c_covariate_balance_rct.png`: SMD 平衡性检验
-
-### Technical Notes | 技术要点
-- **ELT Approach**: Extract → Load → Transform（时间戳快照 + 幂等性加载）
-- **Temporal Contamination Check**: 验证 `visit` 列未受 post-treatment 污染
-- **Wilson Confidence Interval**: 用于低转化率场景的 CI 估计（优于正态近似）
-
-
----
-
-## Phase 2: PSM & Uplift Modeling
-
-### Objective | 目标
-通过 Propensity Score Matching 消除选择偏差，使用 Meta-Learners 估计个体级 CATE，为精准营销提供排序信号。
-
-### 2.1 Propensity Score Matching | 倾向性得分匹配
-
-#### Why PSM? | 为什么需要 PSM？
-虽然 Hillstrom 是 RCT 数据（Selection Bias ≈ 0），但本项目同时展示：
-- **RCT 场景**（无偏差）: 验证方法的正确性，建立因果推断基准
-- **观察性场景**（有偏差）: 展示 PSM 的必要性（真实业务场景对比）
-
-在真实业务中，营销活动投放往往不是随机的（运营倾向于给高价值用户发券），此时需要 PSM 消除选择偏差。
-
-#### PSM Workflow | PSM 流程
-1. **Estimate PS**: 使用 LogisticRegression 估计 P(T=1|X)，clip 到 [0.01, 0.99]
-2. **1:1 Matching**: k-NN (k=200) + caliper=0.2×std(ps)，确保 tie-robust matching
-3. **Balance Check**: 匹配后所有协变量 SMD < 0.1
-4. **ATE Estimation**: 配对差分 + 分层 Bootstrap (n=1000) 估计 95% CI
-
-#### PSM Results | PSM 结果
-
-| Metric | Before Matching | After Matching |
-|--------|----------------|----------------|
-| **Sample Size** | 64,000 | 42,612 (matched pairs) |
-| **Max SMD** | 0.0071 | 0.0045 |
-| **ATE (Conversion)** | 0.4955% | 0.4932% |
-| **95% CI** | - | [0.3156%, 0.6708%] |
-
-**核心洞察**: PSM 后 ATE 几乎不变（0.4955% → 0.4932%），验证了 RCT 数据的无偏性。在观察性数据中，PSM 可显著降低选择偏差。
-
-### 2.2 Uplift Modeling (Meta-Learners) | Uplift 建模
-
-#### Model Comparison | 模型对比
-
-| Learner | AUUC | Qini Coefficient | Workflow |
-|---------|------|------------------|----------|
-| **S-Learner** | 16.10 | 1.67 | 单模型（T 作为特征） |
-| **T-Learner** | 13.75 | -0.68 | 两模型（分组训练） |
-| **X-Learner** | 16.15 | **1.72** ✓ | 三阶段（交叉估计 + PS 加权） |
-
-**最佳模型**: X-Learner（Qini Coef = 1.72）
-
-#### Why X-Learner Wins? | 为什么 X-Learner 最优？（详细数学推导）
-
-##### 数学推导（Mathematical Derivation）
-
-**问题设定**: 在 T:C = 2:1 的不平衡场景下，如何降低 CATE 估计的方差？
-
-**X-Learner 三阶段流程**:
-
-**Stage 1: 分组训练基础模型**
-- 在 Treatment 组训练 μ₁(x): E[Y|X=x, T=1]
-- 在 Control 组训练 μ₀(x): E[Y|X=x, T=0]
-
-**Stage 2: 交叉估计（Imputation）**
-- Treatment 组：用 Control 的 μ₀ 模型估计反事实
-  ```
-  D₁ᵢ = Y₁ᵢ - μ̂₀(x₁ᵢ)  （观测到的 Y₁ - 估计的 Y₀）
-  ```
-- Control 组：用 Treatment 的 μ₁ 模型估计反事实
-  ```
-  D₀ᵢ = μ̂₁(x₀ᵢ) - Y₀ᵢ  （估计的 Y₁ - 观测到的 Y₀）
-  ```
-
-**Stage 3: PS 加权融合**
-- 在 D₁ 上训练 τ̂₁(x)，在 D₀ 上训练 τ̂₀(x)
-- 最终 CATE 估计：
-  ```
-  τ̂(x) = (1 - e(x)) · τ̂₁(x) + e(x) · τ̂₀(x)
-  ```
-  其中 e(x) = P(T=1|X=x) 是 Propensity Score
-
-**方差降低机制（Variance Reduction Mechanism）**:
-
-**Theorem (Künzel et al. 2019)**:
-```
-Var[τ̂_X(x)] ≤ min(Var[τ̂_T(x)], Var[τ̂_S(x)])
+```bash
+python -m pip install -r requirements.txt
+python -m pip install pytest
 ```
 
-**直觉解释**:
-- 当 e(x) 高（Treatment 样本多）时，提高 τ̂₀(x) 权重
-- τ̂₀(x) 是在 Control 组（少数组）上训练的，但它使用了 μ̂₁(x)（在 Treatment 多数组上训练）
-- 相当于"让少数组借用多数组的模型"，将方差从"少数组的直接估计"降低为"多数组的交叉估计"
+说明：建议在虚拟环境中安装；`requirements.txt` 已固定版本以便复现。`pytest` 作为开发依赖单独安装，用于 data-free smoke check。
 
-**本项目实证**:
-- T:C = 2:1 → e(x) ≈ 0.667
-- Control 组样本量 = 21,306（少数组）
-- X-Learner 通过交叉估计，让 Control 组借用 Treatment 组（42,694 样本）的模型
-- 结果：Qini Coef = 1.72（T-Learner = -0.68，劣于随机）
+### 2) No-data smoke check
 
-#### T-Learner 为何表现差？
-
-在转化率极低（0.9%）的场景下，T-Learner 需要在 T=1 与 T=0 两个子样本上分别训练模型，正例更稀少、方差更大，排序噪声可能超过真实信号，从而出现"劣于随机"的表现（Qini Coef = -0.68）。
-
-### Core Visualizations | 核心可视化
-- `fig_02_ps_distribution.png`: PS 分布（Treatment vs Control）
-- `fig_03_smd_before_after.png`: 匹配前后 SMD 对比
-- `fig_04_ate_comparison.png`: Naive ATE vs PSM ATE
-- `fig_05_cate_distributions.png`: S/T/X-Learner CATE 分布对比
-- `fig_06_qini_curves.png`: Qini Curve（模型评估）
-
-### Technical Notes | 技术要点
-- **Qini Curve**: 衡量 Uplift 模型排序能力的金标准（类似 ROC-AUC）
-- **AUUC (Area Under Uplift Curve)**: Qini Curve 下面积
-- **Qini Coefficient**: AUUC - Random AUUC（正值表示优于随机）
-- **Train/Test Split**: 70/30 分割，stratify by T，确保评估无偏
-
-
-
----
-
-## Phase 3: Segmentation & ROI
-
-### Objective | 目标
-基于 X-Learner 的 CATE 估计，进行四象限用户分层，模拟精准投放 ROI，量化业务价值。
-
-### 3.1 Four-Quadrant Segmentation | 四象限用户分层
-
-#### Segmentation Logic | 分层逻辑
-- **CATE 阈值**: P50 分位数（区分高/低 uplift）
-- **Baseline 阈值**: 在高 CATE 子群内使用 P50 分位数（区分 baseline 高/低）
-- **Baseline Proxy**: 通过将用户按 CATE 分成 20 个桶，计算每个桶内控制组转化率得到
-
-#### Segmentation Results | 分层结果
-
-| Segment | Count | Pct | Mean CATE | Mean Baseline (proxy) | Business Interpretation |
-|---------|-------|-----|-----------|----------------------|------------------------|
-| **Persuadables** | 16,000 | 25.0% | 0.0089 | 0.000 (0.0% baseline ratio) | 低 baseline + 高 CATE → 优先投放 |
-| **Sure Things** | 16,000 | 25.0% | 0.0068 | 0.0015 (26% baseline ratio) | 稍高 baseline + 较高 CATE → 次优投放 |
-| **Lost Causes** | 23,407 | 36.6% | 0.0025 | 0.0021 (36% baseline ratio) | 低 CATE → 避免投放 |
-| **Sleeping Dogs** | 8,593 | 13.4% | -0.0041 | 0.0340 (595% baseline ratio) | 负 CATE → 绝对不投放 |
-
-#### Why Persuadables Have Higher Overall Conversion? | 为什么 Persuadables 的总体转化率更高？
-
-**关键理解**: `Overall Conversion (T/C mix)` ≠ Baseline
-
-- **Persuadables**: 低 baseline (~0%) + 高 CATE (~0.9%) → Treatment 组转化率 ~0.9%，与 Control ~0% 混合 → Overall ~1.3%
-- **Sure Things**: 稍高 baseline (~0.15%) + 较低 CATE (~0.7%) → Treatment 组转化率 ~0.85%，与 Control ~0.15% 混合 → Overall ~0.9%
-
-**结论**: Uplift 效应主导了 Overall Conversion，使其在 baseline 比较中产生误导。应关注 **Mean Baseline (proxy)** 和 **Baseline Ratio** 来理解四象限。
-
-#### Baseline Threshold Sensitivity Analysis | Baseline 阈值敏感性分析
-
-测试 P30/P40/P50/P60/P70 五个阈值，从三个维度评估：
-
-| 阈值 | Persuadables Pct | Mean CATE | 评估 |
-|------|-----------------|-----------|------|
-| P30 | 0% | N/A | ✗ 离散化崩溃 |
-| P40 | 0% | N/A | ✗ 离散化崩溃 |
-| **P50** | **25%** | **0.0089** | ✓ **最优** |
-| P60 | 30% | 0.0080 | △ CATE 区分度下降 |
-| P70 | 35% | 0.0075 | △ Sure Things 样本量不足 |
-
-**选择 P50 的理由**:
-1. **统计稳健性**: 样本量均衡（各 25%），方差估计最可靠
-2. **CATE 区分度**: Persuadables Mean CATE 最高（0.0089），相对差异 30.7%
-3. **业务可解释性**: 中位数分割最直观，避免离散化崩溃
-
-### 3.2 Decision Framework | 决策流程图
-
-```
-用户进入营销系统
-        ↓
-估计 CATE = τ̂(x)
-        ↓
-    CATE > P50?
-   /            YES            NO
-  ↓              ↓
-估计 Baseline   Lost Causes
-(proxy)         (36.6%)
-  ↓             → 不投放
-Baseline > P50?
- /          YES         NO
- ↓           ↓
-Sure Things  Persuadables
-(25.0%)      (25.0%)
-→ 次优投放   → 优先投放
-             （核心增量来源）
-
-特殊情况：
-CATE < 0?
-  ↓
-Sleeping Dogs (13.4%)
-→ 绝对不投放（避免负面效果）
+```bash
+python -m compileall src
+python -m pytest -q
 ```
 
-**决策规则（Decision Rules）**:
-1. **优先级 1**: Persuadables（低 baseline + 高 CATE）→ 100% 投放
-2. **优先级 2**: Sure Things（稍高 baseline + 较高 CATE）→ 降低频次投放
-3. **优先级 3**: Lost Causes（低 CATE）→ 不投放
-4. **优先级 4**: Sleeping Dogs（负 CATE）→ 绝对不投放（加入黑名单）
+说明：更完整的测试入口与 Coverage Map 见 [`tests/README.md`](tests/README.md)。
 
-### 3.3 ROI Simulation | ROI 模拟
+### 3) With-data reproduction
 
-#### Simulation Setup | 模拟设置
-- **Full Targeting**: 投放所有 64,000 用户
-- **Random Targeting**: 随机投放（baseline）
-- **Precision Targeting**: 仅投放 Persuadables（16,000 用户）
-- **Cost per Contact**: 1.0（归一化）
-- **Incremental Attribution**: sum(CATE) for targeted users
+1. 将数据文件放到 `data/raw/hillstrom.csv`
+2. 推荐先运行 [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb) 作为最小端到端验收门禁
+3. 如需完整复现，可按顺序执行 [`notebooks/01_data_ingestion_and_eda.ipynb`](notebooks/01_data_ingestion_and_eda.ipynb) 到 [`notebooks/06_robustness_checks.ipynb`](notebooks/06_robustness_checks.ipynb)
 
-#### ROI Results | ROI 结果
+可选的非交互执行方式：
 
-| Strategy | Targeted Users | Incremental Conversions | Cost | ROI |
-|----------|---------------|------------------------|------|-----|
-| **Full Targeting** | 64,000 | 274.27 | 64,000 | 0.004285 |
-| **Random (50%)** | 32,000 | ~137 | 32,000 | ~0.004285 |
-| **Precision Targeting** | 16,000 | 142.29 | 16,000 | **0.008893** |
-
-#### Key Metrics | 核心指标
-- **Budget Saving**: 75.0% (64,000 → 16,000 users)
-- **Conversion Retention**: 51.9% (142.29 / 274.27)
-- **ROI Improvement**: **2.08×** (0.008893 / 0.004285)
-
-**业务价值**: 如果营销预算为 100 万元，精准投放可以节省约 75 万元，同时保留 51.9% 的增量转化效果。节省的预算可以重新分配给其他高 ROI 渠道。
-
-### Core Visualizations | 核心可视化
-- `fig_07_quadrant_scatter.png`: 四象限 Hexbin 密度图（CATE vs Baseline）
-- `fig_07b_segment_baseline_ratio.png`: 各象限 Baseline Ratio 对比
-- `fig_07b_segment_conversion.png`: 各象限观测转化率（RCT arms）
-- `fig_07d_baseline_sensitivity.png`: Baseline 阈值敏感性分析
-- `fig_08_roi_comparison.png`: ROI 对比（Full vs Random vs Precision）
-- `fig_08b_budget_uplift_curve.png`: 预算分配曲线（Precision vs Random）
-
-### Business Recommendations | 业务建议
-
-1. **优先投放 Persuadables**（核心增量来源）
-   - 占比 25%，Mean CATE = 0.0089
-   - 这些用户只有在接受营销时才会转化
-
-2. **停止投放 Sleeping Dogs**（避免负面效果）
-   - 占比 13.4%，Mean CATE = -0.0041
-   - 营销反而导致流失（过度打扰）
-
-3. **对 Sure Things 降低投放频次**（节省预算）
-   - 占比 25%，Mean CATE = 0.0068
-   - 这些用户无论是否营销都会转化
-
-4. **建议每季度重新训练模型**，更新人群分层
-   - 用户行为会随时间变化
-   - 定期更新 CATE 估计以保持精准度
-
-
-
----
-
-## Project Strengths | 项目优势
-
-### Mathematical Rigor | 数学严谨性
-
-#### 因果推断理论基础（Causal Inference Foundation）
-
-本项目基于 Rubin's Potential Outcomes Framework，明确区分 ATE（Average Treatment Effect）与 CATE（Conditional ATE），深刻理解因果推断的根本问题（Fundamental Problem of Causal Inference）。
-
-**关键技术点**:
-- **SMD vs p-value**: 使用 SMD < 0.1 而非 p-value 验证协变量平衡（独立于样本量）
-- **X-Learner 方差降低机制**: 从数学上推导 Var[τ̂_X(x)] ≤ min(Var[τ̂_T(x)], Var[τ̂_S(x)])
-- **PS 加权融合**: 理解 e(x) 在不平衡场景下的方差调节作用
-
-#### 统计方法选择（Statistical Method Selection）
-
-**低转化率场景处理**:
-- **Wilson Confidence Interval**: 在低转化率场景（0.9%）使用 Wilson CI 而非正态近似
-- **Bootstrap CI**: 分层 Bootstrap (n=1000) 估计 ATE 的 95% CI
-- **Stratified Sampling**: Train/Test Split 时保持 Treatment:Control 比例
-- **Simpson's Paradox**: 暴露总体 ATE 掩盖的子群体异质性（差异 2.4 倍）
-
-#### 模型优化策略（Model Optimization）
-
-**T-Learner 失效分析**: 从方差爆炸的角度解释 Qini Coef = -0.68（劣于随机）
-**Baseline Proxy 设计**: 通过 CATE 分桶 + Control 组转化率估计 Baseline（避免 post-treatment bias）
-**Qini Coefficient**: 使用 AUUC - Random AUUC 量化模型排序能力（优于简单的 AUC）
-
----
-
-### Business Impact | 业务价值
-
-#### ROI 量化（ROI Quantification）
-
-本项目将技术分析转化为可量化的业务价值：
-- **精准投放 ROI**: 2.08× (0.008893 vs 0.004285)
-- **预算节省**: 75% (64,000 → 16,000 users)
-- **转化保留率**: 51.9% (142.29 / 274.27)
-- **业务翻译**: "如果营销预算为 100 万元，精准投放可以节省约 75 万元"
-
-#### 四象限人群洞察（Segmentation Insight）
-
-基于 CATE 估计的用户分层提供了清晰的业务决策规则：
-- **Persuadables**: 低 baseline + 高 CATE → 核心增量来源（优先投放）
-- **Sure Things**: 稍高 baseline + 较高 CATE → 浪费预算（降低频次）
-- **Lost Causes**: 低 CATE → 无效投放（避免投放）
-- **Sleeping Dogs**: 负 CATE → 负面效应（绝对不投放）
-
-#### Simpson 悖论识别（Paradox Detection）
-
-通过分层分析揭示数据中的隐藏模式：
-- **总体 ATE** = 0.4955%（看起来营销整体有效）
-- **分层 ATE**: Multichannel 用户 ATE = 0.86%，Phone 用户 ATE = 0.36%（差异 2.4 倍）
-- **业务洞察**: 如果只看总体 ATE，会误以为"一刀切"的全量投放是最优策略
-
----
-
-### Engineering Quality | 工程质量
-
-#### 不可变数据流（Immutable Data Pipeline）
-
-**数据管理最佳实践**:
-- **Timestamped Snapshots**: 原始数据加时间戳快照（`hillstrom_YYYYMMDD_HHMMSS.csv`）
-- **Idempotency Guards**: `load_and_clean()` 检测已存在文件，防止重复处理
-- **ELT Approach**: Extract → Load → Transform，确保数据溯源
-
-**工程价值**: 在业务流水线中，脏数据流入下游因果推断模型会导致极其昂贵的决策失误。通过引入不可变快照和幂等性加载，建立了 Fail-fast 机制。
-
-#### 配置驱动架构（Configuration-Driven Architecture）
-
-**解耦设计**:
-- **Centralized Config**: `configs/config.yml` 管理所有路径、超参数、特征列表
-- **Decoupling**: 业务逻辑与参数解耦，便于 Airflow 等调度系统传参
-
-**工程价值**: 硬编码是大厂工程流水线的大忌。统一配置管理能实现业务逻辑与参数的解耦，方便后续在 Airflow 等调度系统中进行自动化传参和 A/B 实验。
-
-#### 测试与可复现性（Tests & Reproducibility）
-
-**现状说明**:
-- 当前版本未提交自动化单测（`tests/` 不在仓库中）
-- 以 `notebooks/Phase1_DoD.ipynb` 作为最小可执行验收门禁（Artifacts 完整性 + DQ 断言）
-
-**后续增强方向**:
-- 增加不依赖原始数据的合成数据单测：PSM pairing 完整性、bootstrap CI 稳定性、Qini 基本不变量、分群边界条件
-
-#### Git 规范（Conventional Commits）
-
-**协作标准**:
-- **Atomic Commits**: `feat:`, `fix:`, `refactor:`, `docs:`, `chore:`
-- **Commit Message Example**:
-  ```
-  feat(business): add four-quadrant user segmentation (MVP 3.1)
-  refactor(causal): optimize SMD calculation query for covariate balance
-  ```
-
-**工程价值**: 严谨的 Git 流水线习惯能建立完美的审计轨迹（Auditable Trail），这在参与开源项目或企业级协作中是必备技能。
-
-#### 数据质量断言（Data Quality Assertions）
-
-**防御性编程**:
-- **13 个 DQ 断言**: One-hot 编码后列数验证、缺失值检验、数值范围检验、类型检验
-- **Temporal Contamination Check**: 验证 `visit` 列未受 post-treatment 污染
-- **Fail-fast Mechanism**: 在数据流入模型前拦截脏数据
-
-**工程价值**: 在特征工程阶段引入 DQ 断言，确保脏数据在流入因果推断模型前被拦截，避免极其昂贵的决策失误。
-
-
-
----
-
-## Technical Deep Dive | 技术深入解析
-
-### Q1: 为什么选择 X-Learner 而不是 T-Learner？
-
-在 T:C = 2:1 的不平衡场景下，T-Learner 需要在 Control 组（少数组）上独立训练模型，样本不足导致方差爆炸。X-Learner 通过交叉估计（让 Control 组借用 Treatment 组的模型）和 PS 加权，将方差从"少数组的直接估计"降低为"多数组的交叉估计"。
-
-**数学推导**:
-```
-Var[τ̂_X(x)] ≤ min(Var[τ̂_T(x)], Var[τ̂_S(x)])  (Künzel et al. 2019)
+```bash
+jupyter nbconvert --execute --to notebook --inplace notebooks/Phase1_DoD.ipynb
 ```
 
-**实证结果**: X-Learner Qini Coef = 1.72，T-Learner Qini Coef = -0.68（劣于随机）。
+### 4) Local Data + Expected Artifacts
 
-**业务价值**: 更稳定的 CATE 排序信号 → 更精准的用户分层 → 更高的 ROI（2.08×）。
+- 原始数据来自 Hillstrom Email Marketing RCT / MineThatData challenge；pipeline 默认读取本地 `data/raw/hillstrom.csv`，公开仓库默认不再分发原始 CSV
+- 常见产物包括：`data/processed/hillstrom_cleaned.csv`、`data/processed/hillstrom_features.csv`、`data/processed/hillstrom_matched.csv`、`data/processed/cate_vectors.npz`、`data/processed/qini_results.json`、`data/processed/user_segments.csv`
+- 可选的本地审计产物包括：`data/processed/roi_simulation.json`、`data/processed/placebo_results.json`，以及 `data/raw/` 下带时间戳的 raw snapshot
+- 图表默认写入 [`outputs/figures/`](outputs/figures)
 
----
+## Data and Validation Notes
 
-### Q2: 如何向非技术业务方解释 Uplift Modeling？
+Validation is intentionally split between implementation tests and notebook-level statistical evidence.
 
-**类比**: 传统 A/B 测试就像"体检报告的总体平均值"——只能告诉你"营销活动整体有效"，但无法告诉你哪些人真正因为营销而转化。
+本项目把“实现合同验证”和“统计层证据”明确分开：前者负责保证代码与接口不跑偏，后者负责支撑因果与策略层结论。
 
-Uplift Modeling 就像"个性化体检报告"——为每个用户估计"营销带来的增量效应"，从而识别：
-- **Persuadables**: 只有营销才会转化的人（最值得投放）
-- **Sure Things**: 无论是否营销都会转化的人（浪费预算）
-- **Sleeping Dogs**: 营销反而导致流失的人（避免打扰）
+### Validation Boundaries
 
-**ROI 量化**: 精准投放相比全量投放节省 75% 预算，ROI 提升 2.08×。
+- [`tests/README.md`](tests/README.md) 中的 `pytest` 用例主要验证 `src/` 内的实现合同与关键不变量；它们不单独证明因果识别成立或业务 lift 达标
+- 统计层证据来自 notebooks 与 phase reports，其中 [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb) 是最小端到端回归门禁，[`notebooks/06_robustness_checks.ipynb`](notebooks/06_robustness_checks.ipynb) 提供 placebo / falsification evidence
+- `data/raw/` 与 `data/processed/` 是 pipeline 的本地工作目录；重新执行 notebook 时，会在这些目录以及 [`outputs/figures/`](outputs/figures) 下生成或刷新产物
+- [`data/README.md`](data/README.md) 记录了预期目录结构、常见产物和复现路径
+- 项目配置由 `configs/config.yml` 统一管理，包括 covariates、PSM 默认参数（如 `caliper_factor=0.2`）和 `random_state=42`
 
-**结构化说明**:
-- **业务场景**: 在营销活动中，全量投放虽然整体有效，但 ROI 较低（0.004285）
-- **技术方案**: 使用 X-Learner 估计个体级 CATE，将用户分为四象限，仅投放 Persuadables（25%）
-- **业务成果**: 精准投放 ROI 提升 2.08×，节省 75% 预算，同时保留 51.9% 的增量转化效果
+## Methods at a Glance
 
----
+The method stack combines a causal baseline, an uplift ranking layer, and an offline decision layer.
 
-### Q3: Simpson 悖论在本项目中如何体现？
+- `Causal baseline`: 在 RCT 的 `conversion` 结果上使用 difference-in-means 建立总体因果基线
+- `De-biasing workflow`: 用 propensity score estimation、overlap diagnostics、1:1 no-replacement matching、balance checks 与 pair-level bootstrap 形成可审计的 PSM 链路
+- `Uplift modeling`: 用 S/T/X-Learner 估计个体级 CATE，并在 held-out test split 上以 Qini/AUUC 比较排序能力、记录最佳 learner 元数据
+- `Decision layer`: 读取 `data/processed/qini_results.json` 与 `data/processed/cate_vectors.npz`，将 Phase 2 已选 learner 的全样本 CATE 向量翻译成分群、ROI proxy 与预算敏感性分析
+- `Robustness layer`: 用 placebo / permutation test 检查一条与 Phase 2 设计对齐、但由 Notebook 06 在本地内存中重建的 shadow `PS -> matching -> ATE` 链路在随机标签下的假阳性风险
 
-**定义**: 总体趋势与分组趋势相反的统计现象。
+### Important Modeling Conventions
 
-**本项目体现**:
-- **总体 ATE** = 0.4955%（看起来营销整体有效）
-- **分层 ATE**: Multichannel 用户 ATE = 0.86%，Phone 用户 ATE = 0.36%（差异 2.4 倍）
+- `visit` 被排除出 covariates，因为 treatment 会将 visit rate 从 `10.62%` 抬升到 `16.70%`；它更像 treatment 之后的中介变量，而不是有效的前置特征
+- `spend` 保留为辅助业务结果和 ROI 输入，而不是营销成本；Phase 3 的 ROI 使用归一化 `cost_per_contact=1.0` 做相对策略比较，不直接替代真实预算表
+- Phase 3 的 `ROI 2.08x`、`budget -75%` 与 `51.9%` retention 都应理解为 offline policy simulation / policy value proxy，而不是已上线验证的真实业务 ROI
 
-**业务洞察**: 如果只看总体 ATE，会误以为"一刀切"的全量投放是最优策略。但分层分析揭示了巨大的异质性，证明了精准营销的必要性。
+## SQL Slice
 
-**技术总结**: 在本项目中，总体 ATE 为 0.4955%，但分层后发现 Multichannel 用户 ATE 高达 0.86%，而 Phone 用户仅 0.36%，差异 2.4 倍。这就是典型的 Simpson 悖论——总体指标掩盖了子群体的巨大异质性。这个发现直接推动了从"一刀切"的全量投放转向基于 CATE 的精准投放，最终 ROI 提升 2.08×。
+The repo also includes an optional local SQL appendix for demonstrating how validated experiment results and uplift scores can be consumed by reproducible demo queries.
 
----
+- Guide: [`docs/sql_slice.md`](docs/sql_slice.md)
+- Query pack: [`sql/sql_slice/`](sql/sql_slice)
+- 可选的本地验证方式（在生成 `data/processed/*.csv` 后，并安装 `duckdb`）：`python -m pip install duckdb && python scripts/validate_sql_slice_duckdb.py`
+- 这部分作为主线项目的 SQL 补充切片，用于把实验结果、uplift score 与 targeting policy 翻译成可复现的本地 demo 查询流程，而不是生产投放 SOP
+- `customer_id` / `score_date` / `model_version` 在该 appendix 中只承担 repo-local demo contract 的角色，不应解读为已经接入真实生产 activation pipeline
 
-### Q4: 如何处理极端类别不平衡（转化率 0.9%）？
+## Limitations
 
-**技术手段**:
-1. **XGBoost `scale_pos_weight`**: 自动平衡正负样本权重
-   ```python
-   scale_pos_weight = (n_negative / n_positive)
-   ```
-2. **Wilson Confidence Interval**: 用于低转化率场景的 CI 估计（优于正态近似）
-3. **Stratified Sampling**: Train/Test Split 时保持 Treatment:Control 比例
+This repository uses an RCT benchmark and offline policy simulation; observational deployment would still require fresh validation.
 
-**业务理解**: 低转化率场景（rare event）对模型训练提出更高要求，但也意味着更大的优化空间——即使提升 0.1% 的转化率，在百万级用户规模下也能带来显著的业务价值。
+- 当前主数据是 RCT，因此 PSM 在本项目里主要承担可迁移去偏流程的 sanity check / audit 角色
+- ROI simulation 使用统一的归一化成本口径，适合做策略相对比较，不直接替代真实预算表
+- Phase 3 的 ROI / retention 数字是 offline policy value proxy，用于 ranking 与 policy comparison，不等同于已上线验证的财务结果
+- SQL slice 是本地 appendix / handoff demo，用于展示“模型结果如何被 SQL 消费”；它不是已经接入业务系统的生产投放链路
+- 若迁移到观察性投放场景，仍需要重新验证 overlap、balance、placebo stability 与线上 holdout 结果
 
-**技术总结**: 在本项目中，转化率仅 0.9%，属于极端类别不平衡。采用了三个技术手段：1) XGBoost 的 `scale_pos_weight` 自动平衡正负样本权重；2) Wilson CI 替代正态近似（因为正态近似在 p 接近 0 时失效）；3) Stratified Sampling 确保 Train/Test Split 时保持 Treatment:Control 比例。这些手段确保了模型在低转化率场景下的稳健性。
-
----
-
-### Q5: 如何验证 CATE 估计的准确性？
-
-**三层验证策略**:
-
-**第一层：模型评估（Qini Curve）**
-使用 Qini Curve 评估 CATE 排序能力。X-Learner 的 Qini Coefficient = 1.72，显著优于随机（Random = 0）和 T-Learner（-0.68）。Qini Curve 是 Uplift Modeling 的金标准，类似分类任务中的 ROC-AUC，专门衡量模型是否能正确排序高 CATE 用户。
-
-**第二层：敏感性分析（Baseline Threshold）**
-对 Baseline 阈值进行了敏感性分析，测试 P30/P40/P50/P60/P70 五个阈值。结果显示 P50 在统计稳健性、CATE 区分度、业务可解释性三个维度上最优。这证明了四象限分层的稳健性，不依赖于单一阈值选择。
-
-**第三层：RCT 数据验证（Ground Truth）**
-本项目使用 RCT 数据（Hillstrom），所有协变量 SMD < 0.1，验证了无选择偏差。在 RCT 数据中，CATE 估计的无偏性有理论保证（Strong Ignorability）。此外，PSM 后 ATE 几乎不变（0.4955% → 0.4932%），进一步验证了因果识别策略的正确性。
-
----
-
-### Q6: RCT 数据 vs 观察性数据，本项目的方法论如何迁移？
-
-**RCT 数据（本项目）**:
-- **优势**: Selection Bias ≈ 0（所有协变量 SMD < 0.1）
-- **因果识别策略**: 随机化（Randomization）
-- **CATE 估计**: 直接使用 Meta-Learners（S/T/X-Learner）
-- **验证方式**: PSM 后 ATE 几乎不变（0.4955% → 0.4932%）
-
-**观察性数据（真实业务场景）**:
-- **挑战**: Selection Bias ≠ 0（运营倾向于给高价值用户发券）
-- **因果识别策略**: PSM / IPW / DID
-- **CATE 估计**: 先 PSM 消除选择偏差，再使用 Meta-Learners
-- **验证方式**:
-  1. **Balance Check**: 匹配后所有协变量 SMD < 0.1
-  2. **Placebo Test**: 在 pre-treatment 期验证 ATE ≈ 0
-  3. **Sensitivity Analysis**: 测试不同匹配方法（k-NN vs Caliper vs Kernel）
-
-**方法论迁移（Migration Path）**:
-
-| 步骤 | RCT 数据 | 观察性数据 |
-|------|---------|-----------| | **1. Balance Check** | SMD < 0.1（验证随机化） | SMD > 0.1（暴露选择偏差） |
-| **2. Bias Correction** | 跳过（无偏差） | PSM / IPW（消除偏差） |
-| **3. CATE Estimation** | Meta-Learners | Meta-Learners（在匹配后样本上） |
-| **4. Validation** | PSM 后 ATE 不变 | Placebo Test + Sensitivity Analysis |
-
-**技术总结**: 本项目使用 RCT 数据，验证了方法论的正确性（PSM 后 ATE 几乎不变）。在真实业务场景中，营销活动投放往往不是随机的，此时需要先用 PSM 消除选择偏差（确保匹配后 SMD < 0.1），再使用 Meta-Learners 估计 CATE。可以通过 Placebo Test（在 pre-treatment 期验证 ATE ≈ 0）和 Sensitivity Analysis（测试不同匹配方法）来验证因果识别策略的稳健性。
-
----
-
-## References | 参考文献
+## References
 
 1. Rosenbaum, P.R. & Rubin, D.B. (1983). "The central role of the propensity score in observational studies for causal effects." *Biometrika*, 70(1), 41-55.
-
-2. Künzel, S.R., Sekhon, J.S., Bickel, P.J., & Yu, B. (2019). "Metalearners for estimating heterogeneous treatment effects using machine learning." *PNAS*, 116(10), 4156-4165.
-
+2. Kunzel, S.R., Sekhon, J.S., Bickel, P.J., & Yu, B. (2019). "Metalearners for estimating heterogeneous treatment effects using machine learning." *PNAS*, 116(10), 4156-4165.
 3. Radcliffe, N.J. & Surry, P.D. (2011). "Real-world uplift modelling with significance-based uplift trees." *Portrait Technical Report TR-2011-1*.
-
 4. Hillstrom, K. (2008). "The MineThatData E-Mail Analytics And Data Mining Challenge." *MineThatData Blog*.
 
----
+## Contact
 
-## Contact | 联系方式
-
-For questions or collaboration opportunities, please reach out via:
-- GitHub Issues: [Project Repository](https://github.com/CLampard-Y/Data-Analysis-Projects/tree/main/Project3_Causal-Uplift-Marketing)
+- GitHub Issues: [Repository Issues](https://github.com/CLampard-Y/causal-uplift-marketing/issues)
 - Email: nianmingyao.math@outlook.com
-
----
-
