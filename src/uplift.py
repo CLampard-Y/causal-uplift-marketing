@@ -3,7 +3,7 @@
 # ==========================================
 from __future__ import annotations
 
-from typing import Tuple, Optional
+from typing import Optional, Sequence, Tuple
 
 import numpy as np
 import pandas as pd
@@ -11,6 +11,11 @@ import pandas as pd
 # Columns that must never be used as covariates for uplift/CATE estimation.
 # This guards against the most common real-world failure mode: label/post-treatment leakage.
 _FORBIDDEN_FEATURE_COLS = {"treatment", "conversion", "spend", "visit"}
+_QINI_LEARNER_LABELS = {
+    "S": "S-Learner",
+    "T": "T-Learner",
+    "X": "X-Learner",
+}
 
 
 def _validate_feature_frame(X: pd.DataFrame, *, name: str) -> pd.DataFrame:
@@ -616,6 +621,265 @@ def fit_x_learner(
 
     except Exception as exc:
         raise RuntimeError(f"fit_x_learner failed: {exc}") from exc
+
+
+def prepare_tableau_qini_curve_export(
+    qini_results: dict,
+    *,
+    learner_order: Sequence[str] = ("S", "T", "X"),
+) -> pd.DataFrame:
+    """Flatten held-out Qini results into a Tableau-ready long table."""
+
+    required_meta_keys = {
+        "n_bins",
+        "n_test",
+        "treatment_rate_test",
+        "threshold",
+        "best_learner",
+        "best_qini_coefficient",
+        "decision",
+    }
+    required_learner_keys = {
+        "qini_x",
+        "qini_y",
+        "random_y",
+        "auuc",
+        "random_auuc",
+        "qini_coefficient",
+    }
+    expected_columns = [
+        "learner",
+        "learner_label",
+        "learner_display_order",
+        "curve_point_index",
+        "population_pct",
+        "population_pct_label",
+        "population_n",
+        "qini_y",
+        "random_y",
+        "qini_gain_vs_random",
+        "auuc",
+        "random_auuc",
+        "qini_coefficient",
+        "best_learner",
+        "best_learner_flag",
+        "best_qini_coefficient",
+        "n_bins",
+        "n_test",
+        "treatment_rate_test",
+        "threshold",
+        "decision",
+        "evaluation_sample",
+    ]
+
+    def _coerce_positive_int(value: object, *, field_name: str, minimum: int = 1) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{field_name} must be an integer >= {minimum}")
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be an integer >= {minimum}") from exc
+        if not np.isfinite(numeric_value) or not numeric_value.is_integer():
+            raise ValueError(f"{field_name} must be an integer >= {minimum}")
+        int_value = int(numeric_value)
+        if int_value < minimum:
+            raise ValueError(f"{field_name} must be >= {minimum}")
+        return int_value
+
+    def _coerce_finite_float(value: object, *, field_name: str) -> float:
+        try:
+            numeric_value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{field_name} must be finite") from exc
+        if not np.isfinite(numeric_value):
+            raise ValueError(f"{field_name} must be finite")
+        return numeric_value
+
+    def _coerce_float_array(values: object, *, field_name: str) -> np.ndarray:
+        try:
+            array = np.asarray(values, dtype=float)
+        except Exception as exc:
+            raise ValueError(f"{field_name} must be a 1D numeric array") from exc
+        if array.ndim != 1 or array.size == 0:
+            raise ValueError(f"{field_name} must be a non-empty 1D numeric array")
+        if not np.isfinite(array).all():
+            raise ValueError(f"{field_name} contains NaN/inf values")
+        return array.astype(float, copy=False)
+
+    def _format_population_pct_label(population_pct: float) -> str:
+        population_pct_100 = population_pct * 100.0
+        if abs(population_pct_100 - round(population_pct_100)) <= 1e-9:
+            return f"{int(round(population_pct_100))}%"
+        return f"{population_pct_100:.1f}%"
+
+    try:
+        if not isinstance(qini_results, dict) or not qini_results:
+            raise ValueError("qini_results must be a non-empty dict")
+        if not isinstance(learner_order, Sequence) or len(learner_order) == 0:
+            raise ValueError("learner_order must be a non-empty sequence")
+
+        normalized_learner_order = tuple(str(learner).strip() for learner in learner_order)
+        if any(not learner for learner in normalized_learner_order):
+            raise ValueError("learner_order must not contain empty learner ids")
+        if len(set(normalized_learner_order)) != len(normalized_learner_order):
+            raise ValueError("learner_order must contain unique learner ids")
+        unknown_learners = set(normalized_learner_order) - set(_QINI_LEARNER_LABELS)
+        if unknown_learners:
+            raise ValueError(f"learner_order contains unknown learner(s): {sorted(unknown_learners)}")
+
+        meta = qini_results.get("meta")
+        if not isinstance(meta, dict) or not meta:
+            raise ValueError("qini_results['meta'] must be a non-empty dict")
+        missing_meta_keys = required_meta_keys - set(meta.keys())
+        if missing_meta_keys:
+            raise ValueError(f"qini_results['meta'] missing required key(s): {sorted(missing_meta_keys)}")
+
+        n_bins = _coerce_positive_int(meta["n_bins"], field_name="qini_results['meta']['n_bins']", minimum=2)
+        n_test = _coerce_positive_int(meta["n_test"], field_name="qini_results['meta']['n_test']", minimum=1)
+        treatment_rate_test = _coerce_finite_float(
+            meta["treatment_rate_test"],
+            field_name="qini_results['meta']['treatment_rate_test']",
+        )
+        if treatment_rate_test < 0.0 or treatment_rate_test > 1.0:
+            raise ValueError("qini_results['meta']['treatment_rate_test'] must be in [0, 1]")
+        threshold = _coerce_finite_float(meta["threshold"], field_name="qini_results['meta']['threshold']")
+        best_qini_coefficient = _coerce_finite_float(
+            meta["best_qini_coefficient"],
+            field_name="qini_results['meta']['best_qini_coefficient']",
+        )
+        best_learner = str(meta["best_learner"]).strip()
+        if best_learner not in normalized_learner_order:
+            raise ValueError("qini_results['meta']['best_learner'] must belong to the learner set")
+        decision = str(meta["decision"]).strip()
+        if not decision:
+            raise ValueError("qini_results['meta']['decision'] must be a non-empty string")
+
+        learner_keys = set(qini_results.keys()) - {"meta"}
+        expected_learner_keys = set(normalized_learner_order)
+        if learner_keys != expected_learner_keys:
+            raise ValueError(
+                f"qini_results learner set must be exactly {sorted(expected_learner_keys)}"
+            )
+
+        shared_population_grid = None
+        shared_random_y = None
+        learner_qini_scores: dict[str, float] = {}
+        export_rows: list[dict] = []
+
+        for learner_display_order, learner in enumerate(normalized_learner_order, start=1):
+            learner_payload = qini_results.get(learner)
+            if not isinstance(learner_payload, dict) or not learner_payload:
+                raise ValueError(f"qini_results['{learner}'] must be a non-empty dict")
+            missing_learner_keys = required_learner_keys - set(learner_payload.keys())
+            if missing_learner_keys:
+                raise ValueError(
+                    f"qini_results['{learner}'] missing required key(s): {sorted(missing_learner_keys)}"
+                )
+
+            qini_x = _coerce_float_array(learner_payload["qini_x"], field_name=f"qini_results['{learner}']['qini_x']")
+            qini_y = _coerce_float_array(learner_payload["qini_y"], field_name=f"qini_results['{learner}']['qini_y']")
+            random_y = _coerce_float_array(
+                learner_payload["random_y"],
+                field_name=f"qini_results['{learner}']['random_y']",
+            )
+            expected_point_count = n_bins + 1
+            if len(qini_x) != expected_point_count:
+                raise ValueError(f"qini_results['{learner}']['qini_x'] length must equal n_bins + 1")
+            if len(qini_y) != len(qini_x) or len(random_y) != len(qini_x):
+                raise ValueError(f"qini_results['{learner}'] array length consistency check failed")
+            if abs(qini_x[0]) > 1e-12 or abs(qini_x[-1] - 1.0) > 1e-12:
+                raise ValueError(f"qini_results['{learner}']['qini_x'] must span 0% to 100%")
+            if np.any(np.diff(qini_x) < -1e-12):
+                raise ValueError(f"qini_results['{learner}']['qini_x'] must be non-decreasing")
+            if np.any((qini_x < -1e-12) | (qini_x > 1.0 + 1e-12)):
+                raise ValueError(f"qini_results['{learner}']['qini_x'] must stay within [0, 1]")
+
+            if shared_population_grid is None:
+                shared_population_grid = qini_x.copy()
+            elif not np.allclose(qini_x, shared_population_grid, atol=1e-12, rtol=0.0):
+                raise ValueError("All learners must share the same shared population grid")
+
+            if shared_random_y is None:
+                shared_random_y = random_y.copy()
+            elif not np.allclose(random_y, shared_random_y, atol=1e-9, rtol=0.0):
+                raise ValueError("All learners must share the same random baseline")
+
+            auuc = _coerce_finite_float(learner_payload["auuc"], field_name=f"qini_results['{learner}']['auuc']")
+            random_auuc = _coerce_finite_float(
+                learner_payload["random_auuc"],
+                field_name=f"qini_results['{learner}']['random_auuc']",
+            )
+            qini_coefficient = _coerce_finite_float(
+                learner_payload["qini_coefficient"],
+                field_name=f"qini_results['{learner}']['qini_coefficient']",
+            )
+            learner_qini_scores[learner] = qini_coefficient
+
+            for curve_point_index, (population_pct, qini_y_value, random_y_value) in enumerate(
+                zip(qini_x, qini_y, random_y)
+            ):
+                population_pct_value = float(population_pct)
+                population_n = int(round(population_pct_value * n_test))
+                if population_n < 0 or population_n > n_test:
+                    raise ValueError("Derived population_n must stay within [0, n_test]")
+
+                export_rows.append(
+                    {
+                        "learner": learner,
+                        "learner_label": _QINI_LEARNER_LABELS[learner],
+                        "learner_display_order": learner_display_order,
+                        "curve_point_index": curve_point_index,
+                        "population_pct": population_pct_value,
+                        "population_pct_label": _format_population_pct_label(population_pct_value),
+                        "population_n": population_n,
+                        "qini_y": float(qini_y_value),
+                        "random_y": float(random_y_value),
+                        "qini_gain_vs_random": float(qini_y_value - random_y_value),
+                        "auuc": auuc,
+                        "random_auuc": random_auuc,
+                        "qini_coefficient": qini_coefficient,
+                        "best_learner": best_learner,
+                        "best_learner_flag": learner == best_learner,
+                        "best_qini_coefficient": best_qini_coefficient,
+                        "n_bins": n_bins,
+                        "n_test": n_test,
+                        "treatment_rate_test": treatment_rate_test,
+                        "threshold": threshold,
+                        "decision": decision,
+                        "evaluation_sample": "held_out_test",
+                    }
+                )
+
+        if not learner_qini_scores:
+            raise ValueError("qini_results must contain at least one learner payload")
+        max_qini = max(learner_qini_scores.values())
+        best_learners = [
+            learner for learner, score in learner_qini_scores.items() if abs(score - max_qini) <= 1e-12
+        ]
+        if best_learner not in best_learners:
+            raise ValueError("qini_results['meta']['best_learner'] inconsistent with learner qini_coefficient values")
+        if abs(best_qini_coefficient - max_qini) > 1e-12:
+            raise ValueError(
+                "qini_results['meta']['best_qini_coefficient'] inconsistent with learner qini_coefficient values"
+            )
+
+        export_df = pd.DataFrame(export_rows)
+        if list(export_df.columns) != expected_columns:
+            raise ValueError("tableau_qini_curve export schema mismatch")
+        expected_row_count = len(normalized_learner_order) * (n_bins + 1)
+        if len(export_df) != expected_row_count:
+            raise ValueError("tableau_qini_curve export row count mismatch")
+        if set(export_df.loc[export_df["best_learner_flag"], "learner"].unique()) != {best_learner}:
+            raise ValueError("best_learner_flag rows must align with meta.best_learner")
+        if int(export_df["best_learner_flag"].sum()) != n_bins + 1:
+            raise ValueError("best_learner_flag must appear once per curve point for the winning learner")
+
+        return export_df
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"prepare_tableau_qini_curve_export failed: {exc}") from exc
 
 
 def compute_qini(
