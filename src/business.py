@@ -604,6 +604,281 @@ def prepare_tableau_policy_compare_export(
         raise RuntimeError(f"prepare_tableau_policy_compare_export failed: {exc}") from exc
 
 
+def prepare_tableau_budget_curve_export(
+    roi_results: dict,
+    *,
+    selected_policy_name: str = "Persuadables only",
+) -> pd.DataFrame:
+    """Flatten Phase 3 ROI sweep results into a Tableau-ready budget curve long table."""
+
+    expected_budget_grid = [i / 10.0 for i in range(1, 11)]
+
+    def _format_budget_pct_label(budget_pct: float) -> str:
+        budget_pct_100 = budget_pct * 100.0
+        if abs(budget_pct_100 - round(budget_pct_100)) <= 1e-9:
+            return f"{int(round(budget_pct_100))}%"
+        return f"{budget_pct_100:.1f}%"
+
+    def _validate_budget_grid(rows: list[dict], *, node_name: str) -> None:
+        budget_grid: list[float] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ValueError(f"{node_name} rows must be dicts")
+            budget_pct = float(row.get("budget_pct", np.nan))
+            if (not np.isfinite(budget_pct)) or budget_pct <= 0.0 or budget_pct > 1.0:
+                raise ValueError(f"{node_name} rows must contain budget_pct in (0, 1]")
+            budget_grid.append(budget_pct)
+
+        if len(budget_grid) != len(expected_budget_grid) or not np.allclose(
+            budget_grid,
+            expected_budget_grid,
+            atol=1e-12,
+            rtol=0.0,
+        ):
+            raise ValueError(
+                f"{node_name} must use the canonical 10%-100% budget grid"
+            )
+
+    def _expected_n_targeted(*, budget_pct: float, full_n: int) -> int:
+        return max(1, min(full_n, int(round(full_n * budget_pct))))
+
+    try:
+        if not isinstance(roi_results, dict) or not roi_results:
+            raise ValueError("roi_results must be a non-empty dict")
+        if not isinstance(selected_policy_name, str) or not selected_policy_name.strip():
+            raise ValueError("selected_policy_name must be a non-empty string")
+
+        required_keys = {"full_targeting", "random_targeting", "precision_targeting", "budget_sweep"}
+        missing_keys = required_keys - set(roi_results.keys())
+        if missing_keys:
+            raise ValueError(f"roi_results missing required key(s): {sorted(missing_keys)}")
+
+        full_targeting = roi_results["full_targeting"]
+        random_targeting = roi_results["random_targeting"]
+        precision_targeting = roi_results["precision_targeting"]
+        budget_sweep = roi_results["budget_sweep"]
+
+        if not isinstance(full_targeting, dict):
+            raise ValueError("roi_results['full_targeting'] must be a dict")
+        if not isinstance(precision_targeting, dict):
+            raise ValueError("roi_results['precision_targeting'] must be a dict")
+        if not isinstance(random_targeting, list) or len(random_targeting) == 0:
+            raise ValueError("roi_results['random_targeting'] must be a non-empty list")
+        if not isinstance(budget_sweep, list) or len(budget_sweep) == 0:
+            raise ValueError("roi_results['budget_sweep'] must be a non-empty list")
+
+        _validate_budget_grid(budget_sweep, node_name="budget_sweep")
+        _validate_budget_grid(random_targeting, node_name="random_targeting")
+
+        full_n = int(full_targeting.get("n_targeted", 0))
+        full_incremental = float(full_targeting.get("n_incremental_conv", np.nan))
+        full_cost = float(full_targeting.get("total_cost", np.nan))
+        full_roi_reported = float(full_targeting.get("roi", np.nan))
+        if full_n <= 0:
+            raise ValueError("full_targeting.n_targeted must be > 0")
+        if not np.isfinite(full_incremental):
+            raise ValueError("full_targeting.n_incremental_conv must be finite")
+        if not np.isfinite(full_cost) or full_cost <= 0.0:
+            raise ValueError("full_targeting.total_cost must be > 0")
+        if not np.isfinite(full_roi_reported):
+            raise ValueError("full_targeting.roi must be finite")
+
+        full_roi = float(full_incremental / full_cost)
+        if abs(full_roi - full_roi_reported) > 1e-12:
+            raise ValueError("full_targeting.roi inconsistent with n_incremental_conv / total_cost")
+
+        cost_per_contact = float(full_cost / full_n)
+        if (not np.isfinite(cost_per_contact)) or (cost_per_contact <= 0.0):
+            raise ValueError("derived cost_per_contact must be > 0")
+
+        precision_n = int(precision_targeting.get("n_targeted", 0))
+        precision_incremental = float(precision_targeting.get("n_incremental_conv", np.nan))
+        precision_cost = float(precision_targeting.get("total_cost", np.nan))
+        precision_roi_reported = float(precision_targeting.get("roi", np.nan))
+        if precision_n <= 0:
+            raise ValueError("precision_targeting.n_targeted must be > 0")
+        if precision_n > full_n:
+            raise ValueError("precision_targeting.n_targeted cannot exceed full targeting")
+        if not np.isfinite(precision_incremental):
+            raise ValueError("precision_targeting.n_incremental_conv must be finite")
+        if not np.isfinite(precision_cost) or precision_cost <= 0.0:
+            raise ValueError("precision_targeting.total_cost must be > 0")
+        if not np.isfinite(precision_roi_reported):
+            raise ValueError("precision_targeting.roi must be finite")
+
+        expected_precision_cost = float(precision_n * cost_per_contact)
+        if abs(precision_cost - expected_precision_cost) > 1e-12:
+            raise ValueError("precision_targeting.total_cost inconsistent with full_targeting cost_per_contact")
+
+        precision_roi = float(precision_incremental / expected_precision_cost)
+        if abs(precision_roi - precision_roi_reported) > 1e-12:
+            raise ValueError("precision_targeting.roi inconsistent with n_incremental_conv / total_cost")
+
+        selected_budget = float(precision_n / full_n)
+        if (not np.isfinite(selected_budget)) or (selected_budget <= 0.0) or (selected_budget > 1.0):
+            raise ValueError("selected budget must be in (0, 1]")
+
+        reported_budget_saving = precision_targeting.get("budget_saving_pct")
+        if reported_budget_saving is not None:
+            reported_budget_saving_value = float(reported_budget_saving)
+            expected_budget_saving = float((1.0 - selected_budget) * 100.0)
+            if not np.isfinite(reported_budget_saving_value):
+                raise ValueError("precision_targeting.budget_saving_pct must be finite")
+            if abs(reported_budget_saving_value - expected_budget_saving) > 1e-9:
+                raise ValueError("precision_targeting.budget_saving_pct inconsistent with selected budget")
+
+        sweep_endpoint = None
+        random_endpoint = None
+        export_rows: list[dict] = []
+
+        for row in budget_sweep:
+            budget_pct = float(row.get("budget_pct", np.nan))
+            n_targeted = int(row.get("n_targeted", 0))
+            cumulative_uplift = float(row.get("cumulative_uplift", np.nan))
+            expected_n_targeted = _expected_n_targeted(budget_pct=budget_pct, full_n=full_n)
+            if n_targeted <= 0 or n_targeted > full_n:
+                raise ValueError("budget_sweep rows must contain n_targeted in [1, full_targeting.n_targeted]")
+            if n_targeted != expected_n_targeted:
+                raise ValueError("budget_sweep.n_targeted inconsistent with budget_pct and full_targeting.n_targeted")
+            if not np.isfinite(cumulative_uplift):
+                raise ValueError("budget_sweep rows must contain finite cumulative_uplift")
+
+            roi_proxy = float(cumulative_uplift / (n_targeted * cost_per_contact))
+            export_rows.append(
+                {
+                    "series_name": "Ranking upper bound",
+                    "series_role": "ranking_upper_bound",
+                    "budget_pct": budget_pct,
+                    "budget_pct_label": _format_budget_pct_label(budget_pct),
+                    "n_targeted": n_targeted,
+                    "incremental_conversion_proxy": cumulative_uplift,
+                    "roi_proxy": roi_proxy,
+                    "is_selected_policy_marker": False,
+                    "source_node": "budget_sweep",
+                    "curve_semantics": "Continuous CATE ranking upper bound (expand from highest uplift downward)",
+                    "display_order": 1,
+                }
+            )
+            if abs(budget_pct - 1.0) <= 1e-12:
+                sweep_endpoint = (n_targeted, cumulative_uplift)
+
+        if sweep_endpoint is None:
+            raise ValueError("budget_sweep 100% endpoint is required")
+        if sweep_endpoint[0] != full_n or abs(sweep_endpoint[1] - full_incremental) > 1e-9:
+            raise ValueError("budget_sweep 100% endpoint inconsistent with full_targeting.n_incremental_conv")
+
+        for row in random_targeting:
+            budget_pct = float(row.get("budget_pct", np.nan))
+            n_targeted = int(row.get("n_targeted", 0))
+            incremental = float(row.get("n_incremental_conv", np.nan))
+            roi_reported = float(row.get("roi", np.nan))
+            expected_n_targeted = _expected_n_targeted(budget_pct=budget_pct, full_n=full_n)
+            if n_targeted <= 0 or n_targeted > full_n:
+                raise ValueError("random_targeting rows must contain n_targeted in [1, full_targeting.n_targeted]")
+            if n_targeted != expected_n_targeted:
+                raise ValueError("random_targeting.n_targeted inconsistent with budget_pct and full_targeting.n_targeted")
+            if not np.isfinite(incremental):
+                raise ValueError("random_targeting rows must contain finite n_incremental_conv")
+            if not np.isfinite(roi_reported):
+                raise ValueError("random_targeting rows must contain finite roi")
+
+            expected_incremental = float((full_incremental / full_n) * n_targeted)
+            if abs(incremental - expected_incremental) > 1e-9:
+                raise ValueError(
+                    "random_targeting.n_incremental_conv inconsistent with full_targeting mean uplift"
+                )
+
+            roi_proxy = float(incremental / (n_targeted * cost_per_contact))
+            if abs(roi_proxy - roi_reported) > 1e-12:
+                raise ValueError("random_targeting.roi inconsistent with n_incremental_conv / derived cost")
+            if abs(roi_proxy - full_roi) > 1e-12:
+                raise ValueError("random_targeting.roi must equal full_targeting.roi")
+
+            export_rows.append(
+                {
+                    "series_name": "Random baseline",
+                    "series_role": "random_baseline",
+                    "budget_pct": budget_pct,
+                    "budget_pct_label": _format_budget_pct_label(budget_pct),
+                    "n_targeted": n_targeted,
+                    "incremental_conversion_proxy": incremental,
+                    "roi_proxy": roi_proxy,
+                    "is_selected_policy_marker": False,
+                    "source_node": "random_targeting",
+                    "curve_semantics": "Random targeting expectation baseline at each budget",
+                    "display_order": 2,
+                }
+            )
+            if abs(budget_pct - 1.0) <= 1e-12:
+                random_endpoint = (n_targeted, incremental, roi_proxy)
+
+        if random_endpoint is None:
+            raise ValueError("random_targeting 100% endpoint is required")
+        if (
+            random_endpoint[0] != full_n
+            or abs(random_endpoint[1] - full_incremental) > 1e-9
+            or abs(random_endpoint[2] - full_roi) > 1e-12
+        ):
+            raise ValueError("random_targeting 100% endpoint inconsistent with full_targeting")
+
+        export_rows.append(
+            {
+                "series_name": f"Selected policy: {selected_policy_name.strip()}",
+                "series_role": "selected_policy_marker",
+                "budget_pct": selected_budget,
+                "budget_pct_label": _format_budget_pct_label(selected_budget),
+                "n_targeted": precision_n,
+                "incremental_conversion_proxy": precision_incremental,
+                "roi_proxy": precision_roi,
+                "is_selected_policy_marker": True,
+                "source_node": "precision_targeting",
+                "curve_semantics": "Single marker for the currently selected targeting policy",
+                "display_order": 3,
+            }
+        )
+        export_rows.append(
+            {
+                "series_name": "Full targeting reference",
+                "series_role": "full_targeting_reference",
+                "budget_pct": 1.0,
+                "budget_pct_label": _format_budget_pct_label(1.0),
+                "n_targeted": full_n,
+                "incremental_conversion_proxy": full_incremental,
+                "roi_proxy": full_roi,
+                "is_selected_policy_marker": False,
+                "source_node": "full_targeting",
+                "curve_semantics": "Reference endpoint for the full-targeting policy",
+                "display_order": 4,
+            }
+        )
+
+        export_df = pd.DataFrame(export_rows)
+        expected_columns = [
+            "series_name",
+            "series_role",
+            "budget_pct",
+            "budget_pct_label",
+            "n_targeted",
+            "incremental_conversion_proxy",
+            "roi_proxy",
+            "is_selected_policy_marker",
+            "source_node",
+            "curve_semantics",
+            "display_order",
+        ]
+        if list(export_df.columns) != expected_columns:
+            raise ValueError("budget curve export schema mismatch")
+        if int(export_df["is_selected_policy_marker"].sum()) != 1:
+            raise ValueError("budget curve export must contain exactly one selected policy marker")
+
+        return export_df
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"prepare_tableau_budget_curve_export failed: {exc}") from exc
+
+
 def simulate_roi(
     segments_df: pd.DataFrame,
     Y: pd.Series,
