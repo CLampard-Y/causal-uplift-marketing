@@ -61,6 +61,37 @@ Common files generated after running the notebooks.
 - `data/processed/placebo_results.json`
   - Placebo / permutation test results (Notebook 06)
   - 置换 T 后如果效果仍显著，说明存在实现错误/数据泄漏/评估偏差等高风险问题
+- `data/processed/tableau_policy_compare.csv`
+  - Tableau policy summary export
+  - 从 `roi_simulation.json` 扁平化得到的策略对比小表，服务 `Decision Desk` 的 KPI strip 与 Full/Random/Selected policy 对比
+- `data/processed/tableau_budget_curve.csv`
+  - Tableau budget sweep export
+  - 从 `roi_simulation.json` 扁平化得到的预算扫描长表，服务 `Decision Desk` 的预算扩量曲线
+- `data/processed/tableau_qini_curve.csv`
+  - Tableau Qini curve export
+  - 从 `qini_results.json` 扁平化得到的 learner 排序能力长表，服务 `Evidence Desk`
+- `data/processed/tableau_validation_kpis.csv`
+  - Tableau validation KPI export
+  - 汇总 baseline / overlap / PSM / placebo 的小表，服务 `Evidence Desk` 的 proof strip
+
+## Tableau MVP Data Contract
+
+The current Tableau workbook in `dashboard/` consumes a small set of CSV artifacts from `data/processed/`.
+
+| File | Grain | Required columns | Join key | Producer | Consumer |
+|---|---|---|---|---|---|
+| `tableau_policy_compare.csv` | one row per policy | `policy_name`, `policy_role`, `budget_pct`, `n_targeted`, `incremental_conversion_proxy`, `roi_proxy`, `budget_saving_pct`, `conversion_retention_pct`, `roi_proxy_ratio_vs_full`, `selected_policy`, `display_order` | n/a | flatten from `roi_simulation.json` | `Decision Desk` KPI strip / policy compare |
+| `tableau_budget_curve.csv` | one row per budget point per series | `series_name`, `series_role`, `budget_pct`, `n_targeted`, `incremental_conversion_proxy`, `roi_proxy`, `is_selected_policy_marker`, `display_order` | n/a | flatten from `roi_simulation.json` | `Decision Desk` budget trade-off curve |
+| `user_segments.csv` | one row per customer | `customer_id`, `score_date`, `model_version`, `uplift_score`, `cate`, `baseline_prob`, `segment` | `customer_id` | Notebook 05 | `Decision Desk` segment mix / quadrant logic |
+| `hillstrom_features.csv` | one row per customer | `customer_id` plus profile / outcome fields used in Tableau | `customer_id` | Notebook 01/02 | `Decision Desk` profile context |
+| `tableau_qini_curve.csv` | one row per learner per curve point | `learner`, `learner_label`, `curve_point_index`, `population_pct`, `qini_y`, `random_y`, `qini_coefficient`, `best_learner_flag` | n/a | flatten from `qini_results.json` | `Evidence Desk` Qini curve |
+| `tableau_validation_kpis.csv` | one row per validation metric | `proof_block`, `metric_name`, `metric_variant`, `metric_value_raw`, `metric_value_display`, `interpretation`, `display_order` | n/a | manual / derived validation summary | `Evidence Desk` KPI strip / ATE compare |
+
+- 当前 workbook `dashboard/Causal Uplift Marketing(Decision Desk&Evidence Desk).twb` 依赖 `hillstrom_features.csv`、`user_segments.csv`、`tableau_policy_compare.csv`、`tableau_budget_curve.csv`、`tableau_qini_curve.csv`、`tableau_validation_kpis.csv`。
+- 其中 `hillstrom_features.csv` 与 `user_segments.csv` 提供行级分群/画像语义，`tableau_*` 文件提供 Tableau 首版更适合直接消费的 flat-table exports。
+- 如果这些文件缺失，可先按下方 `How To Run` 生成 notebook 产物，再补做对应 Tableau 扁平表导出。
+- 当前 repo 同时保留 `.twbx` 与 `.twb`：`.twbx` 是便于分享的 packaged snapshot，`.twb` 是绑定本地 CSV 的源文件版本。
+- 如果你只想浏览 dashboard，优先打开 `.twbx`；如果你想刷新数据或检查字段契约，回到 `.twb` + `data/processed/*.csv`。
 
 ## How To Run
 
@@ -71,6 +102,7 @@ Run from repo root.
 2) Run notebooks in order under `notebooks/` (01 -> 05).
    - `notebooks/05_segmentation_and_roi.ipynb` will consume `data/processed/cate_vectors.npz` and `data/processed/qini_results.json`, then generate `data/processed/user_segments.csv` and `data/processed/roi_simulation.json`.
 3) Optional: run `notebooks/06_robustness_checks.ipynb` to generate `data/processed/placebo_results.json`.
+4) If you want the Tableau MVP to open without missing sources, also prepare `data/processed/tableau_policy_compare.csv`, `data/processed/tableau_budget_curve.csv`, `data/processed/tableau_qini_curve.csv`, and `data/processed/tableau_validation_kpis.csv`.
 
 Minimal acceptance gate:
 最小验收门禁是 `notebooks/Phase1_DoD.ipynb`（用于端到端回归检查与产物完整性确认）。

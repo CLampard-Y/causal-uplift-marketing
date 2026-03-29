@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/Python-3.10%2B-blue)](https://www.python.org/)
 
-Quick navigation: [Start Here](#start-here) · [Key Results](#key-results) · [Decision Snapshot](#decision-snapshot) · [Documentation Map](#documentation-map) · [Quickstart](#quickstart) · [Limitations](#limitations)
+Quick navigation: [Dashboard Showcase](#dashboard-showcase) · [Start Here](#start-here) · [Key Results](#key-results) · [Decision Snapshot](#decision-snapshot) · [Documentation Map](#documentation-map) · [Quickstart](#quickstart) · [Limitations](#limitations)
 
 ## Overview
 
@@ -20,17 +20,36 @@ This repository studies not only whether a campaign works on average, but who sh
 - 用 Qini/AUUC 评估 uplift 排序能力
 - 用四象限分群与 offline policy simulation 将模型输出转成 targeting 策略
 - 用 placebo / permutation falsification 为主实验补充稳健性证据；Notebook 06 会重估 PS，并通过 notebook-local shadow matcher 计算 placebo ATE，而不是直接回放 Notebook 03 的 matcher
+- 用 `Decision Desk` + `Evidence Desk` 两页 Tableau ，把分析结果翻译成面向业务方的决策台与证据台
 
 总体转化率仅 `0.9031%`，而按渠道分层的 uplift 介于 `+0.3573%` 到 `+0.8609%` 之间。这说明平均值会掩盖具有经济意义的异质性，因此项目重点不止是证明 treatment 有效，而是把异质性翻译成可执行的 targeting 策略。
+
+## Dashboard Showcase
+
+This repository now includes a Tableau MVP that turns the analysis into a business-facing BI deliverable.
+
+- `Decision Desk`: 回答“预算有限时，应该优先投给谁”，把 `Persuadables only` 推荐动作、预算节省与 ROI proxy 压成一页高管摘要
+- `Evidence Desk`: 回答“为什么要相信这个 recommendation”，把实验基线、PSM 证据、Qini 排序能力与 placebo 边界压成一页证据台
+- `Delivery package`: [`dashboard/README.md`](dashboard/README.md) · [`Packaged workbook (.twbx, recommended)`](dashboard/Causal%20Uplift%20Marketing%28Decision%20Desk%26Evidence%20Desk%29.twbx) · [`Source workbook (.twb)`](dashboard/Causal%20Uplift%20Marketing%28Decision%20Desk%26Evidence%20Desk%29.twb) · [`Decision Desk`](dashboard/Decision%20Desk.png) · [`Evidence Desk`](dashboard/Evidence%20Desk.png)
+- `Sharing note`: `.twbx` 适合直接分发给面试官或招聘方打开；`.twb` 继续保留为 repo 内可编辑、可追溯的源文件版本
+- `Refresh note`: 如果你更新了 `data/processed/*.csv`，应优先刷新 `.twb`，再重新导出 `.twbx`，避免 packaged workbook 和 notebook 结果脱节
+
+`Decision Desk` preview:
+
+![Decision Desk preview](dashboard/Decision%20Desk.png)
+
+`Evidence Desk` preview:
+
+![Evidence Desk preview](dashboard/Evidence%20Desk.png)
 
 ## Start Here
 
 Choose a reading path below based on how quickly you want to review the project.
 
-- `30 sec`: 先看 [`docs/case_study_one_pager.md`](docs/case_study_one_pager.md)，这是面向业务沟通的单页入口，先快速把握问题定义、策略选择和核心离线结论
-- `2 min`: 直接打开 [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb)、[`outputs/figures/fig_06_qini_curves.png`](outputs/figures/fig_06_qini_curves.png)、[`outputs/figures/fig_08_roi_comparison.png`](outputs/figures/fig_08_roi_comparison.png)、[`outputs/figures/fig_08b_budget_uplift_curve.png`](outputs/figures/fig_08b_budget_uplift_curve.png)（optional upper-bound expansion analysis）和 [`outputs/figures/fig_09_placebo_ate.png`](outputs/figures/fig_09_placebo_ate.png)
+- `30 sec`: 先看 [`dashboard/README.md`](dashboard/README.md) 与上面的两张 dashboard preview，直接把项目当成一个 Tableau 决策交付件来理解
+- `2 min`: 再看 [`docs/case_study_one_pager.md`](docs/case_study_one_pager.md)，把可视化 recommendation 翻译回业务问题、策略选择和核心离线结论
 - `10 min`: 阅读 [`docs/Phase2_Execution_PRD.md`](docs/Phase2_Execution_PRD.md)、[`docs/Phase3_Execution_PRD.md`](docs/Phase3_Execution_PRD.md)、[`docs/Phase4_Execution_PRD.md`](docs/Phase4_Execution_PRD.md)，按“matching -> targeting -> robustness”快速看完整技术主线；如需本地 SQL demo 补充，再看 [`docs/sql_slice.md`](docs/sql_slice.md)
-- `Reproduce locally`: 按 [Quickstart](#quickstart) 复现，再结合 [`data/README.md`](data/README.md) 和 [`tests/README.md`](tests/README.md) 查看数据布局与验证边界
+- `Reproduce locally`: 按 [Quickstart](#quickstart) 复现，再结合 [`dashboard/README.md`](dashboard/README.md)、[`data/README.md`](data/README.md) 和 [`tests/README.md`](tests/README.md) 查看 `.twbx`/`.twb` 的分工、数据源依赖与验证边界
 
 ## Key Results
 
@@ -60,11 +79,13 @@ This repo goes beyond model comparison and supports a concrete offline targeting
 
 Open these documents for phase-by-phase evidence and implementation details.
 
+- [`dashboard/README.md`](dashboard/README.md): Tableau MVP 的交付索引；说明 `.twbx` 为什么是推荐分享版本、`.twb` 为什么仍保留在 repo，以及两页 dashboard 分别回答什么问题
 - [`docs/case_study_one_pager.md`](docs/case_study_one_pager.md): 业务优先的单页入口；先看推荐策略与核心结论，再回到 phase reports 看证据
 - [`docs/Phase1_Execution_PRD.md`](docs/Phase1_Execution_PRD.md): 数据摄入、EDA、Naive ATE、HTE、RCT 平衡性检查
 - [`docs/Phase2_Execution_PRD.md`](docs/Phase2_Execution_PRD.md): PSM、overlap/positivity、matched ATE、uplift modeling、Qini 评估
 - [`docs/Phase3_Execution_PRD.md`](docs/Phase3_Execution_PRD.md): 四象限分群、`Persuadables only` 默认策略、阈值敏感性，以及作为补充扩量分析的预算曲线
 - [`docs/Phase4_Execution_PRD.md`](docs/Phase4_Execution_PRD.md): placebo / permutation falsification 与 verification boundary
+- [`docs/tableau_execution_manual.md`](docs/tableau_execution_manual.md): Tableau MVP 的 build manual / packaging appendix；说明这套决策台最初是如何规划、取舍和压缩的
 - [`tests/README.md`](tests/README.md): data-free 单元测试范围、运行入口与 Coverage Map
 - [`data/README.md`](data/README.md): 本地数据布局、常见产物与复现路径
 - [`docs/sql_slice.md`](docs/sql_slice.md): 可选的 SQL appendix / local demo runbook；在读完主线分析后，用于把已选定的 `Persuadables only` 策略，以及未来可能的 score-based top-K / cutoff 扩量 demo，翻译成可复现的本地查询
@@ -78,6 +99,7 @@ Key files and directories for configuration, methods, notebooks, and outputs.
 - [`src/causal.py`](src/causal.py): propensity score、matching、balance check、ATE / bootstrap 工具
 - [`src/uplift.py`](src/uplift.py): S/T/X-Learner、Qini / AUUC 评估
 - [`src/business.py`](src/business.py): 分群、ROI simulation 与预算扫描逻辑
+- [`dashboard/`](dashboard): Tableau MVP 的 `.twbx` / `.twb` workbook、dashboard 截图与交付说明
 - [`notebooks/`](notebooks): 分阶段分析与结果输出
 - [`notebooks/Phase1_DoD.ipynb`](notebooks/Phase1_DoD.ipynb): 端到端回归门禁 notebook
 - [`outputs/figures/`](outputs/figures): 各阶段已落盘图表
@@ -123,6 +145,9 @@ jupyter nbconvert --execute --to notebook --inplace notebooks/Phase1_DoD.ipynb
 - 原始数据来自 Hillstrom Email Marketing RCT / MineThatData challenge；pipeline 默认读取本地 `data/raw/hillstrom.csv`，公开仓库默认不再分发原始 CSV
 - 常见产物包括：`data/processed/hillstrom_cleaned.csv`、`data/processed/hillstrom_features.csv`、`data/processed/hillstrom_matched.csv`、`data/processed/cate_vectors.npz`、`data/processed/qini_results.json`、`data/processed/user_segments.csv`
 - 可选的本地审计产物包括：`data/processed/roi_simulation.json`、`data/processed/placebo_results.json`，以及 `data/raw/` 下带时间戳的 raw snapshot
+- Tableau MVP 额外依赖以下 flat files：`data/processed/tableau_policy_compare.csv`、`data/processed/tableau_budget_curve.csv`、`data/processed/tableau_qini_curve.csv`、`data/processed/tableau_validation_kpis.csv`，并与 `data/processed/user_segments.csv`、`data/processed/hillstrom_features.csv` 共同组成当前 workbook 的最小数据包
+- 当前仓库同时保留 [`dashboard/Causal Uplift Marketing(Decision Desk&Evidence Desk).twbx`](dashboard/Causal%20Uplift%20Marketing%28Decision%20Desk%26Evidence%20Desk%29.twbx) 与 [`dashboard/Causal Uplift Marketing(Decision Desk&Evidence Desk).twb`](dashboard/Causal%20Uplift%20Marketing%28Decision%20Desk%26Evidence%20Desk%29.twb)；前者用于低摩擦分享，后者用于本地刷新与版本追踪
+- 若只需要浏览 dashboard，优先打开 `.twbx`；若需要重连数据、刷新图表或继续迭代，使用 `.twb` 并指向本地 `data/processed/` 下的 CSV
 - 图表默认写入 [`outputs/figures/`](outputs/figures)
 
 ## Data and Validation Notes
