@@ -16,6 +16,7 @@ _QINI_LEARNER_LABELS = {
     "T": "T-Learner",
     "X": "X-Learner",
 }
+_TABLEAU_VALIDATION_OVL = 0.9880
 
 
 def _validate_feature_frame(X: pd.DataFrame, *, name: str) -> pd.DataFrame:
@@ -880,6 +881,257 @@ def prepare_tableau_qini_curve_export(
         raise
     except Exception as exc:
         raise RuntimeError(f"prepare_tableau_qini_curve_export failed: {exc}") from exc
+
+
+def prepare_tableau_validation_kpis_export(
+    features_df: pd.DataFrame,
+    matched_df: pd.DataFrame,
+    psm_match_panel: dict,
+    qini_results: dict,
+    placebo_results: dict,
+) -> pd.DataFrame:
+    """Build a Tableau-ready proof-block KPI table for page 2 validation evidence."""
+
+    expected_columns = [
+        "proof_block",
+        "metric_name",
+        "metric_variant",
+        "metric_value_raw",
+        "metric_value_display",
+        "metric_unit",
+        "interpretation",
+        "source_stage",
+        "source_lineage",
+        "source_ref",
+        "display_order",
+        "validation_strip_order",
+        "ate_compare_order",
+    ]
+
+    def _validate_binary_outcome_frame(df: pd.DataFrame, *, name: str) -> pd.DataFrame:
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            raise ValueError(f"{name} must be a non-empty pandas.DataFrame")
+        required_columns = {"treatment", "conversion"}
+        missing_columns = required_columns - set(df.columns)
+        if missing_columns:
+            raise ValueError(f"{name} missing required column(s): {sorted(missing_columns)}")
+
+        working_df = df.loc[:, ["treatment", "conversion"]].copy()
+        for column_name in ("treatment", "conversion"):
+            working_df[column_name] = pd.to_numeric(working_df[column_name], errors="coerce")
+            if working_df[column_name].isnull().any():
+                raise ValueError(f"{name}['{column_name}'] must be numeric and non-null")
+            if not working_df[column_name].isin([0, 1]).all():
+                raise ValueError(f"{name}['{column_name}'] must be binary 0/1")
+            working_df[column_name] = working_df[column_name].astype(int)
+
+        if set(working_df["treatment"].unique()) != {0, 1}:
+            raise ValueError(f"{name}['treatment'] must contain both treatment arms")
+        return working_df
+
+    def _difference_in_means(df: pd.DataFrame, *, name: str) -> float:
+        working_df = _validate_binary_outcome_frame(df, name=name)
+        treated_mean = float(working_df.loc[working_df["treatment"] == 1, "conversion"].mean())
+        control_mean = float(working_df.loc[working_df["treatment"] == 0, "conversion"].mean())
+        ate = float(treated_mean - control_mean)
+        if not np.isfinite(ate):
+            raise ValueError(f"{name} difference-in-means must be finite")
+        return ate
+
+    def _require_dict(payload: object, *, name: str) -> dict:
+        if not isinstance(payload, dict) or not payload:
+            raise ValueError(f"{name} must be a non-empty dict")
+        return payload
+
+    try:
+        canonical_naive_ate = _difference_in_means(features_df, name="features_df")
+        canonical_psm_ate = _difference_in_means(matched_df, name="matched_df")
+
+        psm_panel = _require_dict(psm_match_panel, name="psm_match_panel")
+        psm_counts = _require_dict(psm_panel.get("counts"), name="psm_match_panel['counts']")
+        matched_pairs = int(psm_counts.get("n_pairs", 0))
+        if matched_pairs <= 0:
+            raise ValueError("psm_match_panel['counts']['n_pairs'] must be > 0")
+
+        qini_payload = _require_dict(qini_results, name="qini_results")
+        qini_meta = _require_dict(qini_payload.get("meta"), name="qini_results['meta']")
+        best_learner = str(qini_meta.get("best_learner", "")).strip()
+        if best_learner not in _QINI_LEARNER_LABELS:
+            raise ValueError("qini_results['meta']['best_learner'] must be one of S/T/X")
+        best_qini_coefficient = float(qini_meta.get("best_qini_coefficient", np.nan))
+        if not np.isfinite(best_qini_coefficient):
+            raise ValueError("qini_results['meta']['best_qini_coefficient'] must be finite")
+
+        learner_scores: dict[str, float] = {}
+        for learner in _QINI_LEARNER_LABELS:
+            learner_payload = _require_dict(qini_payload.get(learner), name=f"qini_results['{learner}']")
+            learner_score = float(learner_payload.get("qini_coefficient", np.nan))
+            if not np.isfinite(learner_score):
+                raise ValueError(f"qini_results['{learner}']['qini_coefficient'] must be finite")
+            learner_scores[learner] = learner_score
+        max_qini = max(learner_scores.values())
+        if abs(best_qini_coefficient - max_qini) > 1e-12:
+            raise ValueError(
+                "qini_results['meta']['best_qini_coefficient'] inconsistent with learner qini_coefficient values"
+            )
+        if abs(learner_scores[best_learner] - max_qini) > 1e-12:
+            raise ValueError("qini_results['meta']['best_learner'] inconsistent with learner qini_coefficient values")
+
+        placebo_payload = _require_dict(placebo_results, name="placebo_results")
+        placebo_meta = _require_dict(placebo_payload.get("meta"), name="placebo_results['meta']")
+        shadow_baseline_ate = float(placebo_meta.get("original_ate_psm", np.nan))
+        placebo_p_value = float(placebo_meta.get("p_value_two_sided", np.nan))
+        if not np.isfinite(shadow_baseline_ate):
+            raise ValueError("placebo_results['meta']['original_ate_psm'] must be finite")
+        if not np.isfinite(placebo_p_value):
+            raise ValueError("placebo_results['meta']['p_value_two_sided'] must be finite")
+
+        validation_rows = [
+            {
+                "proof_block": "Experiment baseline",
+                "metric_name": "Naive ATE",
+                "metric_variant": "phase1_naive_display_4dp",
+                "metric_value_raw": canonical_naive_ate,
+                "metric_value_display": f"{canonical_naive_ate * 100.0:.4f}%",
+                "metric_unit": "rate_diff",
+                "interpretation": "Phase 1 RCT difference-in-means baseline; kept at four decimals to preserve the canonical 0.4955% display.",
+                "source_stage": "Phase 1",
+                "source_lineage": "Computed from data/processed/hillstrom_features.csv treatment/control means; display precision anchored to the verified Phase 1 write-up.",
+                "source_ref": "data/processed/hillstrom_features.csv:1; docs/Phase1_Execution_PRD.md:163; README.md:43",
+                "display_order": 1,
+                "validation_strip_order": pd.NA,
+                "ate_compare_order": 1,
+            },
+            {
+                "proof_block": "Matching quality",
+                "metric_name": "OVL",
+                "metric_variant": "phase2_overlap_coefficient",
+                "metric_value_raw": _TABLEAU_VALIDATION_OVL,
+                "metric_value_display": f"{_TABLEAU_VALIDATION_OVL:.4f}",
+                "metric_unit": "index",
+                "interpretation": "Phase 2 positivity diagnostic; near-1.0 overlap supports the matched comparison as an audit trail rather than a sparse-support edge case.",
+                "source_stage": "Phase 2",
+                "source_lineage": "Repo-verified overlap diagnostic carried from Notebook 03 / Phase 2 reporting because psm_match_panel.json does not persist OVL.",
+                "source_ref": "docs/Phase2_Execution_PRD.md:114; README.md:44; notebooks/03_propensity_score_matching.ipynb:346",
+                "display_order": 2,
+                "validation_strip_order": 1,
+                "ate_compare_order": pd.NA,
+            },
+            {
+                "proof_block": "Matching quality",
+                "metric_name": "Matched Pairs",
+                "metric_variant": "phase2_matched_pairs",
+                "metric_value_raw": float(matched_pairs),
+                "metric_value_display": f"{matched_pairs:,}",
+                "metric_unit": "count",
+                "interpretation": "Persisted pair count from the Phase 2 match audit panel; shows the PSM estimate rests on 21,305 treated-control pairs.",
+                "source_stage": "Phase 2",
+                "source_lineage": "Read directly from data/processed/psm_match_panel.json counts.n_pairs to keep the KPI tied to the persisted match audit artifact.",
+                "source_ref": "data/processed/psm_match_panel.json:6; README.md:44",
+                "display_order": 3,
+                "validation_strip_order": 2,
+                "ate_compare_order": pd.NA,
+            },
+            {
+                "proof_block": "Matching quality",
+                "metric_name": "PSM ATE",
+                "metric_variant": "phase2_canonical_psm_display_3dp",
+                "metric_value_raw": canonical_psm_ate,
+                "metric_value_display": f"{canonical_psm_ate * 100.0:.3f}%",
+                "metric_unit": "rate_diff",
+                "interpretation": "Canonical Phase 2 matched estimate for the main experiment; keep this separate from the Phase 4 shadow baseline used only for placebo falsification.",
+                "source_stage": "Phase 2",
+                "source_lineage": "Computed from data/processed/hillstrom_matched.csv matched-sample means; display label anchored to the canonical Phase 2 PSM report.",
+                "source_ref": "data/processed/hillstrom_matched.csv:1; docs/Phase2_Execution_PRD.md:116; README.md:45",
+                "display_order": 4,
+                "validation_strip_order": 3,
+                "ate_compare_order": 2,
+            },
+            {
+                "proof_block": "Uplift ranking",
+                "metric_name": "Best learner (held-out Qini)",
+                "metric_variant": "phase2_best_qini_evidence",
+                "metric_value_raw": best_qini_coefficient,
+                "metric_value_display": f"{_QINI_LEARNER_LABELS[best_learner]} | {best_qini_coefficient:.6f}",
+                "metric_unit": "qini_coefficient",
+                "interpretation": (
+                    f"Held-out ranking winner from Phase 2; {_QINI_LEARNER_LABELS[best_learner]} beats "
+                    f"S-Learner {learner_scores['S']:.6f} and T-Learner {learner_scores['T']:.6f}."
+                ),
+                "source_stage": "Phase 2",
+                "source_lineage": "Read from data/processed/qini_results.json meta.best_learner/meta.best_qini_coefficient after the held-out learner comparison in Notebook 04.",
+                "source_ref": "data/processed/qini_results.json:2; docs/Phase2_Execution_PRD.md:120; README.md:46",
+                "display_order": 5,
+                "validation_strip_order": 4,
+                "ate_compare_order": pd.NA,
+            },
+            {
+                "proof_block": "Placebo falsification",
+                "metric_name": "Placebo p-value",
+                "metric_variant": "phase4_placebo_p_two_sided",
+                "metric_value_raw": placebo_p_value,
+                "metric_value_display": f"{placebo_p_value:.4f}",
+                "metric_unit": "p_value",
+                "interpretation": "Two-sided permutation p-value from Phase 4; low probability supports that the placebo world stays near zero while the shadow baseline lands in the tail.",
+                "source_stage": "Phase 4",
+                "source_lineage": "Read directly from data/processed/placebo_results.json meta.p_value_two_sided and displayed at four decimals for the evidence strip.",
+                "source_ref": "data/processed/placebo_results.json:20; docs/Phase4_Execution_PRD.md:119; README.md:48",
+                "display_order": 6,
+                "validation_strip_order": 5,
+                "ate_compare_order": pd.NA,
+            },
+            {
+                "proof_block": "Placebo falsification",
+                "metric_name": "Shadow baseline ATE",
+                "metric_variant": "phase4_shadow_baseline_display_3dp",
+                "metric_value_raw": shadow_baseline_ate,
+                "metric_value_display": f"{shadow_baseline_ate * 100.0:.3f}%",
+                "metric_unit": "rate_diff",
+                "interpretation": "Notebook 06 robustness-only shadow baseline used as the placebo red-line reference; do not substitute it for the Phase 2 canonical PSM estimate.",
+                "source_stage": "Phase 4",
+                "source_lineage": "Read directly from data/processed/placebo_results.json meta.original_ate_psm, which stores the robustness notebook's shadow baseline chain.",
+                "source_ref": "data/processed/placebo_results.json:7; docs/Phase4_Execution_PRD.md:110; docs/Phase4_Execution_PRD.md:113",
+                "display_order": 7,
+                "validation_strip_order": pd.NA,
+                "ate_compare_order": 3,
+            },
+        ]
+
+        export_df = pd.DataFrame(validation_rows)
+        export_df["validation_strip_order"] = export_df["validation_strip_order"].astype("Int64")
+        export_df["ate_compare_order"] = export_df["ate_compare_order"].astype("Int64")
+
+        if list(export_df.columns) != expected_columns:
+            raise ValueError("tableau_validation_kpis export schema mismatch")
+        if len(export_df) != 7:
+            raise ValueError("tableau_validation_kpis export row count mismatch")
+        if export_df["metric_variant"].duplicated().any():
+            raise ValueError("tableau_validation_kpis metric_variant values must be unique")
+        if export_df["source_ref"].astype(str).str.strip().eq("").any():
+            raise ValueError("tableau_validation_kpis source_ref must be non-empty")
+        if export_df["source_lineage"].astype(str).str.strip().eq("").any():
+            raise ValueError("tableau_validation_kpis source_lineage must be non-empty")
+
+        if export_df.loc[export_df["metric_name"] == "Naive ATE", "metric_value_display"].iloc[0] != "0.4955%":
+            raise ValueError("Phase 1 Naive ATE display precision must stay at 0.4955%")
+        if export_df.loc[export_df["metric_name"] == "PSM ATE", "metric_value_display"].iloc[0] != "0.502%":
+            raise ValueError("Phase 2 canonical PSM ATE display must stay at 0.502%")
+        if export_df.loc[export_df["metric_name"] == "Shadow baseline ATE", "metric_value_display"].iloc[0] != "0.521%":
+            raise ValueError("Phase 4 shadow baseline ATE display must stay at 0.521%")
+
+        validation_orders = export_df.loc[export_df["validation_strip_order"].notna(), "validation_strip_order"].tolist()
+        ate_orders = export_df.loc[export_df["ate_compare_order"].notna(), "ate_compare_order"].tolist()
+        if validation_orders != [1, 2, 3, 4, 5]:
+            raise ValueError("validation strip order must be [1, 2, 3, 4, 5]")
+        if ate_orders != [1, 2, 3]:
+            raise ValueError("ATE compare order must be [1, 2, 3]")
+
+        return export_df
+
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"prepare_tableau_validation_kpis_export failed: {exc}") from exc
 
 
 def compute_qini(

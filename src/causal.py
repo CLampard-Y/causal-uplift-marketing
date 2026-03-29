@@ -134,8 +134,12 @@ def estimate_ps(
         "(3) checking for perfect separation, or (4) using regularization."
     )
 
-    # RCT-specific validation: enforce only when the treatment ratio indicates a 2:1 RCT-like design.
-    # This keeps the function reusable for non-RCT/synthetic unit tests while preserving the Phase 2 narrative checks.
+    # ----------------------------------------------
+    # 5) PS Sanity Check
+    # ----------------------------------------------
+    # RCT-specific validation: 
+    #   - enforce only when the treatment ratio indicates a 2:1 RCT-like design.
+    #   - This keeps the function reusable for non-RCT/synthetic unit tests while preserving the Phase 2 narrative checks.
     t_rate = float(T_numeric.mean())
     if 0.60 <= t_rate <= 0.72:
         assert 0.60 <= float(ps.mean()) <= 0.72, "PS mean deviates from treatment ratio; check feature matrix"
@@ -210,8 +214,10 @@ def match_ps(
         # ----------------------------------------------------
         # 2) Core Matching Logic
         # ----------------------------------------------------
-        # Caliper scaling by ps dispersion reduces caller error and stabilizes match quality across datasets.
-        # Internal caliper: 0.2 × std(ps) (global std, ddof=0 to match numpy default)
+        # Logic:
+        #   1) Caliper scaling by ps dispersion reduces caller error and stabilizes match quality across datasets.
+        #   2) Internal caliper: 0.2 × std(ps) (global std, ddof=0 to match numpy default)
+
         # copy=False: improves performance, read-only view is enough
         caliper = 0.2 * float(np.std(ps.to_numpy(dtype=float, copy=False), ddof=0))
         if not np.isfinite(caliper) :
@@ -375,7 +381,7 @@ def match_ps(
         assert matched_df["match_id"].dtype.kind in {"i", "u"}, "match_id must be an integer dtype"
 
         # ------------------------------------------------------
-        # 5) Persistence (architecture review adjustment #3)
+        # 7) Persistence (architecture review adjustment #3)
         # ------------------------------------------------------
         out_path = Path("data/processed/hillstrom_matched.csv")
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -470,8 +476,8 @@ def check_balance(
 
             mu_t = float(x_t.mean())
             mu_c = float(x_c.mean())
-            sd_t = float(x_t.std(ddof=1))
-            sd_c = float(x_c.std(ddof=1))
+            sd_t = float(x_t.std(ddof = 1))
+            sd_c = float(x_c.std(ddof = 1))
 
             pooled = np.sqrt((sd_t**2 + sd_c**2) / 2.0)
 
@@ -608,7 +614,7 @@ def compute_ate(
         # ------------------------------------------------------
         # 2) Calculate Estimate ATE By Paired Differences
         # ------------------------------------------------------
-        # The variance of within-pair differences is smaller than the variance of between-pair differences.
+        # The variance of within-pair differences is smaller than the variance of between-row differences.
         # Enforce strict pair structure: each match_id must contain exactly 2 rows (1 treated + 1 control).
         pair_check = (
             matched_df.assign(_t=t.astype(int))

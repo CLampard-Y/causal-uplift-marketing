@@ -896,7 +896,7 @@ def simulate_roi(
     ----------
     segments_df : pd.DataFrame (output of segment_users())
         用户分群结果 (segment_users() 的输出)
-        shape: (~64K, 3+)
+        shape: (~64K, 3)
         columns:
         - cate: float — 原始 CATE 值
         - baseline_prob: float — 控制组转化率 (同 CATE 分位数桶)
